@@ -1,0 +1,108 @@
+{
+  "name": "Emovils — CPA Safeguard (El Guardián del $6)",
+  "description": "Monitoreo cada 6 horas. Si CPA > $8, pausa todos los anuncios y alerta al dueño INMEDIATAMENTE.",
+  "nodes": [
+    {
+      "id": "trigger_monitor",
+      "name": "Monitor cada 6 horas",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "position": [100, 300],
+      "parameters": {
+        "rule": {
+          "interval": [{"field": "hours", "hoursInterval": 6}]
+        }
+      }
+    },
+    {
+      "id": "get_pilot_data",
+      "name": "Obtener Estado del Piloto",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [300, 300],
+      "parameters": {
+        "url": "={{ $env.BACKEND_URL }}/analytics/pilot-totals",
+        "method": "GET"
+      }
+    },
+    {
+      "id": "evaluate_cpa",
+      "name": "Evaluar CPA",
+      "type": "n8n-nodes-base.code",
+      "position": [500, 300],
+      "parameters": {
+        "language": "python",
+        "code": "data = $input.item.json\n\ntotal_spent = data.get('total_spent', 0)\ntotal_clients = data.get('total_clients', 0)\n\nif total_clients == 0:\n    return [{'cpa': None, 'should_pause': False, 'status': 'SIN_CLIENTES'}]\n\ncpa = round(total_spent / total_clients, 2)\n\nif cpa < 6:\n    status = 'SALUDABLE'\n    should_pause = False\n    emoji = '✅'\nelif cpa <= 8:\n    status = 'ALERTA_AMARILLA'\n    should_pause = False\n    emoji = '⚠️'\nelse:\n    status = 'ALERTA_ROJA'\n    should_pause = True\n    emoji = '🔴'\n\nreturn [{\n    'cpa': cpa,\n    'total_spent': total_spent,\n    'total_clients': total_clients,\n    'status': status,\n    'should_pause': should_pause,\n    'emoji': emoji\n}]"
+      }
+    },
+    {
+      "id": "check_pause_needed",
+      "name": "¿Pausar?",
+      "type": "n8n-nodes-base.if",
+      "position": [700, 300],
+      "parameters": {
+        "conditions": {
+          "boolean": [{"value1": "={{ $json.should_pause }}", "value2": true}]
+        }
+      }
+    },
+    {
+      "id": "pause_all_campaigns",
+      "name": "PAUSAR TODAS las Campañas",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [900, 200],
+      "parameters": {
+        "url": "https://graph.facebook.com/v19.0/act_{{ $env.META_AD_ACCOUNT_ID }}/campaigns",
+        "method": "GET",
+        "queryParameters": {
+          "access_token": "={{ $env.META_ACCESS_TOKEN }}",
+          "fields": "id,name,status",
+          "filtering": "[{\"field\":\"effective_status\",\"operator\":\"IN\",\"value\":[\"ACTIVE\"]}]"
+        }
+      }
+    },
+    {
+      "id": "alert_owner_pause",
+      "name": "ALERTA ROJA al Dueño",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [900, 350],
+      "parameters": {
+        "url": "={{ $env.WHATSAPP_API_URL }}/messages",
+        "method": "POST",
+        "headers": {"D360-API-KEY": "={{ $env.WHATSAPP_API_KEY }}"},
+        "body": {
+          "messaging_product": "whatsapp",
+          "to": "={{ $env.OWNER_WHATSAPP }}",
+          "type": "text",
+          "text": {
+            "body": "=🔴 ALERTA: CPA SUPERÓ EL LÍMITE\n\nCPA Actual: ${{ $('Evaluar CPA').item.json.cpa }}\nLímite: $6.00\nAcción: TODOS LOS ANUNCIOS PAUSADOS\n\nGastado: ${{ $('Evaluar CPA').item.json.total_spent }}\nClientes: {{ $('Evaluar CPA').item.json.total_clients }}\n\n¿Qué hacer ahora?\n1. Revisar qué campaña falló\n2. Cambiar targeting o copy\n3. Reiniciar con $1/día para test\n4. O pausar el piloto y replantear\n\nEs tu decisión. El sistema ya pausó todo."
+          }
+        }
+      }
+    },
+    {
+      "id": "log_alert_airtable",
+      "name": "Registrar Alerta en Airtable",
+      "type": "n8n-nodes-base.airtable",
+      "position": [900, 500],
+      "parameters": {
+        "operation": "create",
+        "baseId": "={{ $env.AIRTABLE_BASE_ID }}",
+        "tableId": "Metricas",
+        "fields": {
+          "Fecha": "={{ $now }}",
+          "Tipo": "SAFEGUARD_CPA_PAUSA",
+          "CPA_Actual": "={{ $('Evaluar CPA').item.json.cpa }}",
+          "Mensaje": "=🔴 PAUSA AUTOMÁTICA: CPA ${{ $('Evaluar CPA').item.json.cpa }} > $6",
+          "Accion_Requerida": "Revisar campaña y reiniciar con $1/día",
+          "Status": "pendiente_revision"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "trigger_monitor": {"main": [["get_pilot_data"]]},
+    "get_pilot_data": {"main": [["evaluate_cpa"]]},
+    "evaluate_cpa": {"main": [["check_pause_needed"]]},
+    "check_pause_needed": {"main": [["pause_all_campaigns", "alert_owner_pause", "log_alert_airtable"]]}
+  },
+  "settings": {"timezone": "America/Santo_Domingo"}
+}
