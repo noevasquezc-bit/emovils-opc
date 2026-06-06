@@ -420,74 +420,67 @@ def calculate_fare(inp: FareInput, cfg: dict = None) -> FareOutput:
 # UTILIDAD: RESUMEN DE REGLAS PARA EL AGENTE
 # ─────────────────────────────────────────────
 PRICING_RULES_FOR_AGENT = """
-REGLAS DE COTIZACION EMOVILS:
+REGLAS DE COTIZACION EMOVILS — APLICA SIEMPRE EXACTAMENTE ASI:
 
-CRITICO — MONEDA:
-  SIEMPRE cotiza en PESOS DOMINICANOS (RD$). NUNCA en dolares. NUNCA en USD.
-  Aunque el cliente pregunte en dolares, responde en RD$.
+== MONEDA ==
+SIEMPRE en pesos dominicanos (RD$). NUNCA en dolares. NUNCA en USD.
 
-DATOS REQUERIDOS (no cotizar sin estos):
-- Punto de recogida
-- Punto de destino
-- Cantidad de pasajeros
-
-VEHICULOS:
+== VEHICULOS ==
 - 1 a 4 pasajeros: sedan
 - 5 a 7 pasajeros: van
-- Mas de 7 pasajeros: escalar a supervisor
+- Mas de 7: escalar al supervisor
 
-TARIFA MINIMA: RD$300 (ningun servicio puede cotizarse por debajo)
+== FORMULA DE PRECIO (servicios urbanos) ==
+Tienes que saber los KILOMETROS reales del recorrido antes de calcular.
+NUNCA inventes kilometros. Si no los sabes, pregunta al cliente.
 
-PRECIOS AEROPUERTO SDQ (tarifas fijas en RD$):
-  - Boca Chica:          sedan RD$1,500-1,800 / van RD$2,100-2,700
-  - Santo Domingo Este:  sedan RD$1,800-2,100 / van RD$2,400-3,000
-  - Zona Colonial / DN:  sedan RD$2,100-2,400 / van RD$2,700-3,300
-  - Piantini / Naco:     sedan RD$2,400-2,700 / van RD$3,300-3,900
-  - Punta Cana:          sedan RD$8,700-9,600 / van RD$13,200-16,800
-  Si el sector no esta en la lista, escala al supervisor.
+Precio sedan segun distancia:
+  Hasta 3 km       → RD$300 (minimo absoluto)
+  4 km             → RD$350
+  5 km             → RD$400
+  6 km             → RD$450
+  7 km             → RD$500
+  8 km             → RD$550
+  9 km             → RD$600
+  10 km            → RD$650
+  12 km            → RD$730
+  15 km            → RD$850
+  18 km            → RD$970
+  20 km            → RD$1,050
+  25 km            → RD$1,200
+  30 km            → RD$1,350
+  40 km            → RD$1,650
+  50 km            → RD$1,950
+  60 km            → RD$2,250
+  70 km            → RD$2,550
+  Si la distancia cae entre dos valores, interpola o usa el valor superior.
 
-PRECIOS SERVICIOS URBANOS (rangos orientativos en RD$):
-  Corto (hasta 5 km):   sedan RD$300-500   / van RD$420-700
-  Medio (5-15 km):      sedan RD$500-900   / van RD$700-1,260
-  Largo (15-30 km):     sedan RD$900-1,500 / van RD$1,260-2,100
-  Muy largo (30+ km):   escalar a supervisor para cotizar
-  Recargo nocturno (9PM-6AM): +20% sobre el precio base
+Precio van = precio sedan x 1.40 (redondea al multiplo de 25 mas cercano)
 
-RECARGO NOCTURNO (9:00 PM a 6:00 AM): +20% sobre el precio calculado
+== RECARGO NOCTURNO ==
+Entre 9:00 PM y 6:00 AM: multiplica el precio por 1.20 (+20%)
+Por eso es OBLIGATORIO preguntar la hora antes de dar precio.
 
-ESPERA:
-  - Hasta 15 min: sin cargo
-  - 16-30 min: RD$75
-  - 31-60 min: RD$150
-  - 61-75 min: RD$200
-  - 76-90 min: RD$300
-  - Mas de 90 min: escalar a supervisor
+== TRASLADOS AL AEROPUERTO SDQ (tarifas fijas en RD$) ==
+Estas son tarifas fijas — no uses la formula urbana para aeropuerto:
+  Boca Chica:         sedan RD$1,500 / van RD$2,100
+  Santo Domingo Este: sedan RD$1,800 / van RD$2,520
+  Zona Colonial / DN: sedan RD$2,100 / van RD$2,940
+  Piantini / Naco:    sedan RD$2,400 / van RD$3,360
+  Punta Cana:         sedan RD$8,700 / van RD$12,180
+  Si el sector no esta en esta lista, escala al supervisor.
 
-PARADAS ADICIONALES: RD$150 a RD$300 por parada
+== DISTANCIA ==
+El sistema calcula la distancia con Google Maps cuando el cliente comparte su ubicacion.
+Cuando el contexto incluya [PRECIO_CALCULADO: RD$X, Ykm, Zmin], usa ese precio exactamente.
+Si no hay precio calculado, pide ubicacion WhatsApp o sector/direccion de recogida y destino.
 
-IDA Y VUELTA: descuento maximo 10%
-
-ESCALAR A SUPERVISOR CUANDO:
-  - Mas de 7 pasajeros
-  - Servicio B2B / empresarial / corporativo
-  - Tour, excursion, servicio turistico
-  - Ruta recurrente o contrato mensual
-  - El sistema no puede calcular distancia/tiempo
-  - Espera mayor a 90 minutos
-  - Cliente pide descuento mayor al 10%
-  - Servicio fuera de zona operativa
-  - Condiciones especiales no previstas
-
-PROHIBIDO AL AGENTE:
-  - Cotizar en dolares (USD) — SIEMPRE en RD$
-  - Revelar comision de Emovils o pago al conductor
-  - Cotizar por debajo de RD$300
-  - Confirmar reserva sin: nombre, telefono, origen, destino, fecha y hora
-  - Dar descuentos mayores al 10% sin autorizacion
-  - Prometer disponibilidad sin validar
-  - Inventar precios si faltan datos
-  - Inventar kilometros o tiempos de ruta — usa los rangos de la tabla
-  - Aplicar la formula urbana si no tienes km y minutos reales — usa el rango orientativo
+== PROHIBIDO ==
+- Dar precio en USD o dolares
+- Cotizar sin saber la hora (por el recargo nocturno)
+- Dar precio sin al menos saber origen y destino
+- Mostrar formulas o calculos al cliente — solo el precio final
+- Cotizar por debajo de RD$300
 """
 
 

@@ -17,6 +17,7 @@ from lib.pricing_engine import (
 )
 from workflows.wf_reserva_urgente import detectar_urgencia, PROMPT_MODO_URGENTE
 from workflows.wf_followup_sequence import schedule_followup_sequence
+from lib.google_maps import calculate_route_price
 
 logger = logging.getLogger(__name__)
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -112,6 +113,7 @@ SYSTEM_PROMPT = (
 )
 
 CONVERSATION_HISTORY = {}
+LOCATION_CACHE = {}  # wa_number -> {'lat': float, 'lon': float}
 
 
 def process_incoming_message(webhook_payload: dict) -> dict:
@@ -147,6 +149,14 @@ def process_incoming_message(webhook_payload: dict) -> dict:
 
     CONVERSATION_HISTORY[wa_number].append({"role": "user", "content": message_text})
 
+    # Cache location if client shared WhatsApp location
+    if msg.get("type") == "location":
+        lat = msg.get("latitude")
+        lon = msg.get("longitude")
+        if lat and lon:
+            LOCATION_CACHE[wa_number] = {"lat": float(lat), "lon": float(lon)}
+            logger.info("Ubicacion guardada para %s***: %.4f, %.4f", wa_number[:6], lat, lon)
+
     # Urgencia
     es_urgente = detectar_urgencia(message_text)
 
@@ -168,6 +178,78 @@ def process_incoming_message(webhook_payload: dict) -> dict:
     }
 
 
+
+def _try_calculate_price(wa_number: str, history: list) -> str:
+    """
+    Intenta calcular el precio con Google Maps si tenemos ubicacion + destino + hora.
+    Retorna el [PRECIO_CALCULADO] string para inyectar en el system prompt, o "" si no hay suficiente info.
+    """
+    location = LOCATION_CACHE.get(wa_number)
+    if not location:
+        return ""
+
+    # Extract destination and hour from conversation history (last 20 messages)
+    full_text = " ".join(
+        m["content"] for m in history[-20:] if isinstance(m.get("content"), str)
+    ).lower()
+
+    # Try to detect destination from conversation
+    destination = None
+    aeropuerto_keywords = ["aeropuerto", "aila", "sdq", "las americas", "vuelo"]
+    if any(k in full_text for k in aeropuerto_keywords):
+        destination = "Aeropuerto Internacional Las Americas, Santo Domingo, DO"
+
+    # Look for common destinations mentioned
+    if not destination:
+        dest_hints = ["punta cana", "santiago", "la romana", "samana", "boca chica",
+                      "zona colonial", "piantini", "naco", "bella vista"]
+        for hint in dest_hints:
+            if hint in full_text:
+                destination = hint + ", Republica Dominicana"
+                break
+
+    if not destination:
+        return ""
+
+    # Try to detect hour from conversation
+    import re
+    service_hour = None
+    hour_matches = re.findall(r'\b(\d{1,2})(?::(?:\d{2}))?\s*(?:am|pm|de la noche|de la manana|madrugada)?', full_text)
+    for hm in hour_matches:
+        try:
+            h = int(hm)
+            if 0 <= h <= 23:
+                service_hour = h
+                break
+        except Exception:
+            pass
+    # Night keywords
+    if service_hour is None and any(k in full_text for k in ["noche", "madrugada", "pm", "medianoche"]):
+        service_hour = 22  # assume night if night words present
+
+    # Detect passengers
+    passengers = 1
+    pax_match = re.search(r'(\d+)\s*(?:pasajeros?|personas?|pax)', full_text)
+    if pax_match:
+        passengers = int(pax_match.group(1))
+
+    # Call Google Maps
+    origin_str = f"{location['lat']},{location['lon']}"
+    try:
+        result = calculate_route_price(
+            origin=origin_str,
+            destination=destination,
+            passengers=passengers,
+            service_hour=service_hour
+        )
+        if "error" not in result:
+            return result["note_for_agent"]
+    except Exception as e:
+        logger.warning("Error calculando precio Maps: %s", e)
+
+    return ""
+
+
 def generate_sales_response(wa_number: str, message: str, history: list, urgente: bool = False) -> str:
     """
     Genera la respuesta usando Claude con el SYSTEM_PROMPT actualizado.
@@ -177,6 +259,12 @@ def generate_sales_response(wa_number: str, message: str, history: list, urgente
     if urgente:
         system = SYSTEM_PROMPT + "\n\n" + PROMPT_MODO_URGENTE
         logger.info("Modo URGENTE activado para %s***", wa_number[:6])
+
+    # Try Google Maps price calculation if we have location + some destination context
+    price_note = _try_calculate_price(wa_number, history)
+    if price_note:
+        system = system + "\n\n" + price_note
+        logger.info("Precio calculado para %s***: %s", wa_number[:6], price_note[:80])
 
     response = client.messages.create(
         model=CLAUDE_MODEL,
