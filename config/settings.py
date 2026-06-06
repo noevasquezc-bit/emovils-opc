@@ -69,9 +69,17 @@ GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
 N8N_BASE_URL = os.getenv("N8N_BASE_URL", "https://app.n8n.cloud")
 N8N_API_KEY = os.getenv("N8N_API_KEY", "")
 
-# Claude AI (Agentes IA)
+# Claude AI (Agentes IA) — mantenido como fallback
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
+
+# OpenAI (LLM principal + TTS para voz de Monserrat)
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")  # Más económico
+
+# QR.io (códigos QR de recogida)
+QRIO_API_KEY = os.getenv("QRIO_API_KEY", "pyvwUlSI1QFACKbD2WXu")
+BACKEND_URL = os.getenv("BACKEND_URL", "https://emovils-bot-v2-production.up.railway.app")
 
 # ─────────────────────────────────────────────
 # NOTIFICACIONES AL DUEÑO
