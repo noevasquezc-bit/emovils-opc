@@ -17,6 +17,13 @@ from agents.agent_contenido import create_instagram_post, create_7day_content_ca
 from lib.paypal_api import handle_webhook, capture_payment
 from config.safeguards import CPAEvaluator
 from lib.airtable_api import get_pilot_totals
+from lib.booking_manager import (
+    create_booking, validate_required_fields, get_confirmation_message,
+    get_driver_assignment_message, validate_customer_qr, confirm_pickup,
+    BookingStatus, PaymentStatus, VehicleVerificationStatus,
+    CustomerQRStatus
+)
+from lib.qr_generator import build_vehicle_qr_payload
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -191,6 +198,143 @@ def health_check_pilot():
         return jsonify(health)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+
+# ─────────────────────────────────────────────
+# RESERVAS
+# ─────────────────────────────────────────────
+@app.route("/booking/create", methods=["POST"])
+def booking_create():
+    """Crea una nueva reserva con validacion de datos obligatorios."""
+    data = request.get_json()
+    try:
+        missing = validate_required_fields(data)
+        if missing:
+            return jsonify({
+                "error": "Datos faltantes",
+                "missing_fields": missing,
+                "message": "Faltan los siguientes datos para confirmar la reserva: " + ", ".join(missing)
+            }), 400
+
+        booking = create_booking(
+            customer_name=data["customer_name"],
+            customer_phone=data["customer_phone"],
+            origin=data["origin"],
+            destination=data["destination"],
+            service_date=data["service_date"],
+            service_time=data["service_time"],
+            passengers=int(data["passengers"]),
+            vehicle_type=data["vehicle_type"],
+            final_price=float(data["final_price"]),
+            payment_method=data["payment_method"],
+            customer_whatsapp=data.get("customer_whatsapp", ""),
+            notes=data.get("notes", "")
+        )
+
+        confirmation_msg = get_confirmation_message(booking)
+        return jsonify({
+            "booking_id": booking.booking_id,
+            "booking_status": booking.booking_status,
+            "payment_status": booking.payment_status,
+            "customer_qr_status": booking.customer_qr_status,
+            "customer_qr_url": booking.customer_qr_url,
+            "confirmation_message": confirmation_msg
+        })
+    except Exception as e:
+        logger.error("Error creando reserva: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/booking/validate-fields", methods=["POST"])
+def validate_booking_fields():
+    """Valida si estan todos los datos para confirmar una reserva."""
+    data = request.get_json()
+    missing = validate_required_fields(data or {})
+    return jsonify({
+        "ready": len(missing) == 0,
+        "missing_fields": missing
+    })
+
+
+# ─────────────────────────────────────────────
+# VERIFICACION QR — CLIENTE ESCANEA VEHICULO
+# ─────────────────────────────────────────────
+@app.route("/vehicle/verify/<vehicle_id>", methods=["GET"])
+def vehicle_verify(vehicle_id):
+    """
+    El cliente escanea el QR del vehiculo.
+    Retorna GREEN / RED / YELLOW segun validaciones.
+    """
+    token = request.args.get("token", "")
+    booking_id = request.args.get("booking_id", "")
+
+    # En produccion: consultar base de datos con vehicle_id y token
+    # Por ahora retorna estructura de respuesta correcta
+    try:
+        # TODO: consultar Airtable/DB para validar vehicle_id + token + booking
+        # Estructura de respuesta para la pantalla del cliente
+        result = {
+            "vehicle_id": vehicle_id,
+            "color_status": "yellow",
+            "boarding_allowed": False,
+            "vehicle_verification_status": VehicleVerificationStatus.YELLOW_PENDING,
+            "status_message": "Validacion pendiente. Contacte a la central antes de abordar.",
+            "call_central": True,
+            "emovils_central": "+18091234567"
+        }
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({
+            "color_status": "red",
+            "boarding_allowed": False,
+            "vehicle_verification_status": VehicleVerificationStatus.RED_FAILED,
+            "status_message": "No aborde. Contacte a la central de Emovils.",
+            "error": str(e)
+        }), 500
+
+
+# ─────────────────────────────────────────────
+# VERIFICACION QR — CONDUCTOR ESCANEA QR DEL CLIENTE
+# ─────────────────────────────────────────────
+@app.route("/verify/<booking_id>", methods=["GET"])
+def customer_qr_verify(booking_id):
+    """
+    El conductor escanea el QR del cliente.
+    Valida reserva, token, conductor asignado y estado del QR.
+    """
+    token = request.args.get("token", "")
+    driver_id = request.args.get("driver_id", "")
+
+    # En produccion: consultar DB por booking_id, validar token y driver_id
+    # Retornar resultado de validacion
+    return jsonify({
+        "booking_id": booking_id,
+        "token_received": bool(token),
+        "status": "pending_validation",
+        "message": "Validacion en proceso. Configure la base de datos para activar esta funcion."
+    })
+
+
+@app.route("/driver/confirm-pickup", methods=["POST"])
+def driver_confirm_pickup():
+    """El conductor confirma la recogida despues de escanear el QR del cliente."""
+    data = request.get_json()
+    booking_id = data.get("booking_id")
+    driver_id = data.get("driver_id")
+    location = data.get("location", "")
+
+    if not booking_id or not driver_id:
+        return jsonify({"error": "booking_id y driver_id son requeridos"}), 400
+
+    # En produccion: actualizar estado en DB
+    return jsonify({
+        "booking_id": booking_id,
+        "pickup_confirmed": True,
+        "booking_status": BookingStatus.IN_PROGRESS,
+        "customer_qr_status": CustomerQRStatus.USED,
+        "message": "Recogida confirmada. Servicio en progreso."
+    })
 
 
 # ─────────────────────────────────────────────

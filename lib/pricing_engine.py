@@ -1,5 +1,5 @@
 """
-Emovils / eTransfers — Motor de Cotizacion de Precios
+Emovils — Motor de Cotizacion de Precios
 Calcula tarifas de forma automatica, clara, rentable y alineada al mercado dominicano.
 Todas las variables son configurables sin reprogramar la logica.
 """
