@@ -1,7 +1,7 @@
 """
-Emovils OPC — WhatsApp API via GREEN API ✅
-Canal principal de ventas, cotización y cierre.
-Green API: https://green-api.com — Conectado con número 18298610090
+Emovils — WhatsApp API via GREEN API
+Canal principal de ventas, cotizacion y cierre.
+Green API: https://green-api.com — Instancia 7107644324 / numero 18298610090
 """
 import requests
 import logging
@@ -11,82 +11,65 @@ from config.settings import WHATSAPP_API_URL, WHATSAPP_INSTANCE_ID, WHATSAPP_API
 logger = logging.getLogger(__name__)
 
 
-# ─────────────────────────────────────────────
-# BASE URL para Green API
-# Formato: {apiUrl}/waInstance{instanceId}/{method}/{apiTokenInstance}
-# ─────────────────────────────────────────────
 def _url(method: str) -> str:
     return f"{WHATSAPP_API_URL}/waInstance{WHATSAPP_INSTANCE_ID}/{method}/{WHATSAPP_API_KEY}"
 
 
-# ─────────────────────────────────────────────
-# GUIONES DE WHATSAPP — Emovils Airport
-# ─────────────────────────────────────────────
 SCRIPTS = {
-    "bienvenida_cotizacion": """Hola, gracias por contactar a Emovils. 🚗
-
-Con gusto le cotizamos su traslado. Para darle precio exacto, por favor envíenos:
-1. Fecha de llegada/salida
-2. Hora estimada
-3. Aerolínea y número de vuelo
-4. Destino final
-5. Cantidad de pasajeros
-6. Cantidad aproximada de maletas
-7. Si desea solo ida o ida y vuelta
-
-Nuestro servicio es privado, formal, con precio confirmado antes de su llegada.""",
-
-    "seguimiento_no_responde": """Hola, le escribo para confirmar si aún desea reservar su traslado desde el aeropuerto.
-
-Podemos dejarle el servicio coordinado antes de su llegada para que no tenga que negociar transporte ni esperar al salir.""",
-
-    "cierre_reserva": """Perfecto. Podemos reservar su traslado.
-
-Para confirmar necesitamos:
-- Nombre del pasajero:
-- Fecha y hora:
-- Número de vuelo:
-- Destino:
-- Cantidad de pasajeros:
-- Teléfono de contacto:
-
-Una vez confirmado, le enviamos los datos del servicio y las instrucciones de encuentro.""",
-
-    "confirmacion_pago": """✅ ¡Reserva confirmada!
-
-Su traslado está listo. Detalles del servicio:
-- Chofer: {nombre_chofer}
-- Vehículo: {vehiculo}
-- WhatsApp del chofer: {tel_chofer}
-- Punto de encuentro: Sala de llegadas internacionales, señal con su nombre.
-
-¿Alguna pregunta? Estamos aquí.""",
-
-    "recordatorio_24h": """Hola {nombre}, le recordamos que mañana tiene su traslado con Emovils.
-
-- Fecha: {fecha}
-- Hora: {hora}
-- Vuelo: {vuelo}
-- Chofer: {chofer}
-
-Si hay algún cambio en su vuelo, avísenos de inmediato. 🙏""",
-
-    "solicitar_resena": """Esperamos que su traslado haya sido excelente, {nombre}.
-
-Si le pareció bien el servicio, ¿podría dejarnos una reseña de 5 estrellas? Nos ayuda mucho:
-👉 {google_review_link}
-
-¡Gracias y hasta la próxima!"""
+    "bienvenida_cotizacion": (
+        "Hola, gracias por contactar a Emovils Traslados Ejecutivos.\n\n"
+        "Con gusto le cotizamos su traslado. Para darle precio exacto necesitamos:\n"
+        "1. Punto de origen\n"
+        "2. Destino\n"
+        "3. Fecha y hora\n"
+        "4. Cantidad de pasajeros\n\n"
+        "Si puede compartir su ubicacion de WhatsApp o la direccion exacta, "
+        "le calculamos el precio de inmediato."
+    ),
+    "seguimiento_no_responde": (
+        "Hola, le escribo para confirmar si aun desea reservar su traslado.\n\n"
+        "Podemos dejarle el servicio coordinado con anticipacion para evitar contratiempos."
+    ),
+    "cierre_reserva": (
+        "Perfecto. Para confirmar la reserva necesitamos:\n"
+        "- Nombre del pasajero:\n"
+        "- Fecha y hora:\n"
+        "- Origen:\n"
+        "- Destino:\n"
+        "- Cantidad de pasajeros:\n"
+        "- Forma de pago preferida:\n\n"
+        "Una vez confirmado, le enviamos los datos del servicio y del conductor."
+    ),
+    "confirmacion_pago": (
+        "Reserva confirmada.\n\n"
+        "Su traslado esta listo. Detalles del servicio:\n"
+        "- Chofer: {nombre_chofer}\n"
+        "- Vehiculo: {vehiculo}\n"
+        "- WhatsApp del chofer: {tel_chofer}\n\n"
+        "Cualquier pregunta, estamos aqui."
+    ),
+    "recordatorio_24h": (
+        "Hola {nombre}, le recordamos que manana tiene su traslado con Emovils.\n\n"
+        "- Fecha: {fecha}\n"
+        "- Hora: {hora}\n"
+        "- Vuelo: {vuelo}\n"
+        "- Chofer: {chofer}\n\n"
+        "Si hay algun cambio en su vuelo, avisenos de inmediato."
+    ),
+    "solicitar_resena": (
+        "Esperamos que su traslado haya sido excelente, {nombre}.\n\n"
+        "Si le parecio bien el servicio, podria dejarnos una resena de 5 estrellas? "
+        "Nos ayuda mucho:\n"
+        "{google_review_link}\n\n"
+        "Gracias y hasta la proxima!"
+    )
 }
 
 
-# ─────────────────────────────────────────────
-# ENVÍO DE MENSAJES — Green API
-# ─────────────────────────────────────────────
 def send_text(to: str, message: str) -> dict:
     """
-    Envía un mensaje de texto por WhatsApp via Green API.
-    'to' debe ser el número completo: 18298610090 (sin + ni espacios)
+    Envia un mensaje de texto por WhatsApp via Green API.
+    'to' debe ser el numero completo: 18298610090 (sin + ni espacios)
     """
     chat_id = f"{to}@c.us" if "@" not in to else to
     payload = {
@@ -95,12 +78,12 @@ def send_text(to: str, message: str) -> dict:
     }
     resp = requests.post(_url("sendMessage"), json=payload, timeout=15)
     resp.raise_for_status()
-    logger.info(f"Mensaje enviado a {to[:6]}***")
+    logger.info("Mensaje enviado a %s***", to[:6])
     return resp.json()
 
 
 def send_file_by_url(to: str, url: str, filename: str, caption: str = "") -> dict:
-    """Envía un archivo (imagen, PDF) por URL."""
+    """Envia un archivo (imagen, PDF) por URL."""
     chat_id = f"{to}@c.us" if "@" not in to else to
     payload = {
         "chatId": chat_id,
@@ -120,19 +103,18 @@ def send_quote(
     hora: str,
     origen: str,
     destino: str,
-    precio_usd: float,
-    paypal_link: str
+    precio_rd: int,
+    paypal_link: str = ""
 ) -> dict:
-    """Envía la cotización con precio y link de pago PayPal."""
+    """Envia la cotizacion con precio en pesos dominicanos."""
     message = (
-        f"✅ Cotización Emovils Airport\n\n"
-        f"Pasajero: {nombre}\n"
-        f"Fecha: {fecha} — {hora}\n"
-        f"Ruta: {origen} → {destino}\n"
-        f"Precio: USD ${precio_usd:.2f}\n\n"
-        f"Para reservar y confirmar su traslado, realice el pago aquí:\n"
-        f"👉 {paypal_link}\n\n"
-        f"Una vez confirmado el pago, le enviamos los datos del chofer."
+        "Cotizacion Emovils Traslados Ejecutivos\n\n"
+        "Pasajero: " + nombre + "\n"
+        "Fecha: " + fecha + " — " + hora + "\n"
+        "Ruta: " + origen + " -> " + destino + "\n"
+        "Precio: RD$" + "{:,}".format(precio_rd) + "\n\n"
+        "Para confirmar la reserva, indicarnos su forma de pago preferida.\n"
+        "Formas de pago: Zelle, PayPal, tarjeta o efectivo."
     )
     return send_text(to, message)
 
@@ -144,13 +126,9 @@ def get_instance_state() -> dict:
     return resp.json()
 
 
-# ─────────────────────────────────────────────
-# WEBHOOK — Recepción de mensajes
-# ─────────────────────────────────────────────
 def receive_notification() -> Optional[dict]:
     """
-    Recibe una notificación de la cola de Green API (polling).
-    Usar cuando no hay webhook configurado.
+    Recibe una notificacion de la cola de Green API (polling).
     """
     resp = requests.get(_url("receiveNotification"), timeout=15)
     if resp.status_code == 200:
@@ -161,7 +139,7 @@ def receive_notification() -> Optional[dict]:
 
 
 def delete_notification(receipt_id: int) -> bool:
-    """Borra una notificación de la cola después de procesarla."""
+    """Borra una notificacion de la cola despues de procesarla."""
     url = (
         f"{WHATSAPP_API_URL}/waInstance{WHATSAPP_INSTANCE_ID}"
         f"/deleteNotification/{WHATSAPP_API_KEY}/{receipt_id}"
@@ -172,8 +150,8 @@ def delete_notification(receipt_id: int) -> bool:
 
 def parse_webhook_event(payload: dict) -> Optional[dict]:
     """
-    Parsea un webhook/notificación de Green API y extrae el mensaje.
-    Green API usa formato diferente a Meta Cloud API.
+    Parsea un webhook/notificacion de Green API y extrae el mensaje.
+    Soporta: mensajes de texto y mensajes de ubicacion (location).
     """
     try:
         body = payload.get("body", payload)
@@ -184,27 +162,71 @@ def parse_webhook_event(payload: dict) -> Optional[dict]:
 
         message_data = body.get("messageData", {})
         sender_data = body.get("senderData", {})
-        text_data = message_data.get("textMessageData", {})
 
         from_number = sender_data.get("sender", "").replace("@c.us", "")
         contact_name = sender_data.get("senderName", "")
-        text = text_data.get("textMessage", "")
         message_id = body.get("idMessage", "")
         timestamp = body.get("timestamp", 0)
+        type_message = message_data.get("typeMessage", "")
 
-        if not from_number or not text:
+        if not from_number:
             return None
 
+        # Mensaje de texto
+        if type_message == "textMessage":
+            text_data = message_data.get("textMessageData", {})
+            text = text_data.get("textMessage", "")
+            if not text:
+                return None
+            return {
+                "from": from_number,
+                "type": "text",
+                "text": text,
+                "timestamp": timestamp,
+                "message_id": message_id,
+                "contact_name": contact_name
+            }
+
+        # Mensaje de ubicacion (location share)
+        if type_message == "locationMessage":
+            location_data = message_data.get("locationMessageData", {})
+            latitude = location_data.get("latitude", 0)
+            longitude = location_data.get("longitude", 0)
+            name_location = location_data.get("nameLocation", "")
+            address = location_data.get("address", "")
+
+            # Generar texto descriptivo de la ubicacion para el agente
+            location_text = f"[UBICACION COMPARTIDA] Lat: {latitude}, Lon: {longitude}"
+            if address:
+                location_text += f" | Direccion: {address}"
+            if name_location:
+                location_text += f" | Lugar: {name_location}"
+
+            return {
+                "from": from_number,
+                "type": "location",
+                "text": location_text,
+                "latitude": latitude,
+                "longitude": longitude,
+                "address": address,
+                "name_location": name_location,
+                "timestamp": timestamp,
+                "message_id": message_id,
+                "contact_name": contact_name
+            }
+
+        # Otros tipos de mensaje (imagen, audio, etc.) — acusar recibo
         return {
             "from": from_number,
-            "type": "text",
-            "text": text,
+            "type": type_message,
+            "text": f"[Archivo recibido: {type_message}]",
             "timestamp": timestamp,
             "message_id": message_id,
             "contact_name": contact_name
         }
+
     except Exception as e:
-        logger.error(f"Error parseando webhook Green API: {e}")
+        logger.error("Error parseando webhook Green API: %s", e)
         return None
 
 
@@ -224,5 +246,7 @@ def extract_booking_data(message_text: str) -> dict:
         "pasajeros": None,
         "maletas": None,
         "tipo_servicio": "ida",
-        "forma_pago": None
+        "forma_pago": None,
+        "latitud": None,
+        "longitud": None
     }
