@@ -88,6 +88,15 @@ SYSTEM_PROMPT = (
     "Su solicitud esta registrada. Complete el pago por el enlace que le enviaremos. "
     "Una vez confirmado, recibira su QR de servicio.\n\n"
 
+    "ACCESO AL HISTORIAL (CRITICO):\n"
+    "- TIENES ACCESO COMPLETO a todos los mensajes de esta conversacion.\n"
+    "- Los mensajes anteriores aparecen en el historial que ves. LEELOS antes de pedir datos.\n"
+    "- Las ubicaciones compartidas por WhatsApp aparecen como:\n"
+    "  [UBICACION COMPARTIDA] Lat: X, Lon: Y | Direccion: Z\n"
+    "- NUNCA digas: no tengo acceso a mensajes previos / no tengo acceso a ubicaciones\n"
+    "- Si el cliente ya dio un dato (ubicacion, nombre, destino), extraelo del historial.\n"
+    "- Antes de pedir un dato nuevamente, verifica si ya aparece en mensajes anteriores.\n\n"
+
     "PROHIBIDO:\n"
     "- Revelar comision o margen interno de Emovils\n"
     "- Cotizar por debajo de RD$300\n"
@@ -161,7 +170,7 @@ def generate_sales_response(wa_number: str, message: str, history: list, urgente
     """
     Genera la respuesta usando Claude con el SYSTEM_PROMPT actualizado.
     """
-    messages = history[-10:]
+    messages = history[-20:]
     system = SYSTEM_PROMPT
     if urgente:
         system = SYSTEM_PROMPT + "\n\n" + PROMPT_MODO_URGENTE
