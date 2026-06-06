@@ -34,7 +34,8 @@ SYSTEM_PROMPT = (
     "- Al presentarte di siempre: Emovils Traslados Ejecutivos\n\n"
 
     "FLUJO DE ATENCION:\n"
-    "1. Saluda como Emovils Traslados Ejecutivos\n"
+    "1. Cuando alguien escriba POR PRIMERA VEZ, saludalo calurosamente y pregunta en que puedes ayudarle.\n"
+       "   Ejemplo: Hola, bienvenido a Emovils Traslados Ejecutivos. Con gusto le ayudo. En que le puedo apoyar?\n"
     "2. Recopila: punto de recogida, destino y cantidad de pasajeros\n"
     "3. Pide ubicacion de WhatsApp o direccion exacta para calcular distancia\n"
     "4. Si el servicio es normal (urbano o aeropuerto), cotiza segun las reglas de precios\n"
@@ -251,3 +252,29 @@ def send_quotation(
         distance_km=km,
         time_minutes=km * 3 if km > 0 else 0
     )
+
+
+def handle_objection(wa_number: str, objection_type: str) -> str:
+    """Maneja objeciones del cliente."""
+    objections = {
+        "precio_caro": (
+            "Entendemos la consulta sobre el precio.\n\n"
+            "Con Emovils usted tiene precio confirmado antes del servicio, "
+            "chofer identificado y sin sorpresas. El precio es fijo y final."
+        ),
+        "tiene_conocido": (
+            "Perfecto, si ya tiene transporte coordinado, excelente.\n\n"
+            "Como plan B: si ese arreglo falla, estamos disponibles 24/7."
+        ),
+        "inseguridad": (
+            "Nuestros choferes estan identificados. Al confirmar, enviamos "
+            "nombre del chofer, placa del vehiculo y WhatsApp directo."
+        ),
+        "lo_pienso": (
+            "Claro, tomese su tiempo.\n\n"
+            "Cuando sea necesario, escribanos y le coordinamos de inmediato."
+        )
+    }
+    response_text = objections.get(objection_type, SCRIPTS["bienvenida_cotizacion"])
+    send_text(wa_number, response_text)
+    return response_text
