@@ -422,6 +422,10 @@ def calculate_fare(inp: FareInput, cfg: dict = None) -> FareOutput:
 PRICING_RULES_FOR_AGENT = """
 REGLAS DE COTIZACION EMOVILS:
 
+CRITICO — MONEDA:
+  SIEMPRE cotiza en PESOS DOMINICANOS (RD$). NUNCA en dolares. NUNCA en USD.
+  Aunque el cliente pregunte en dolares, responde en RD$.
+
 DATOS REQUERIDOS (no cotizar sin estos):
 - Punto de recogida
 - Punto de destino
@@ -434,16 +438,20 @@ VEHICULOS:
 
 TARIFA MINIMA: RD$300 (ningun servicio puede cotizarse por debajo)
 
-FORMULA URBANA (sedan):
-  Precio = RD$300 base + (km x RD$40) + (minutos x RD$4)
-  Van: precio sedan x 1.40
+PRECIOS AEROPUERTO SDQ (tarifas fijas en RD$):
+  - Boca Chica:          sedan RD$1,500-1,800 / van RD$2,100-2,700
+  - Santo Domingo Este:  sedan RD$1,800-2,100 / van RD$2,400-3,000
+  - Zona Colonial / DN:  sedan RD$2,100-2,400 / van RD$2,700-3,300
+  - Piantini / Naco:     sedan RD$2,400-2,700 / van RD$3,300-3,900
+  - Punta Cana:          sedan RD$8,700-9,600 / van RD$13,200-16,800
+  Si el sector no esta en la lista, escala al supervisor.
 
-AEROPUERTO SDQ (tarifa fija por zona en USD):
-  - Boca Chica: sedan US$25-30 / van US$35-45
-  - Santo Domingo Este: sedan US$30-35 / van US$40-50
-  - Zona Colonial / DN: sedan US$35-40 / van US$45-55
-  - Piantini / Naco: sedan US$40-45 / van US$55-65
-  - Punta Cana: sedan US$145-160 / van US$220-280
+PRECIOS SERVICIOS URBANOS (rangos orientativos en RD$):
+  Corto (hasta 5 km):   sedan RD$300-500   / van RD$420-700
+  Medio (5-15 km):      sedan RD$500-900   / van RD$700-1,260
+  Largo (15-30 km):     sedan RD$900-1,500 / van RD$1,260-2,100
+  Muy largo (30+ km):   escalar a supervisor para cotizar
+  Recargo nocturno (9PM-6AM): +20% sobre el precio base
 
 RECARGO NOCTURNO (9:00 PM a 6:00 AM): +20% sobre el precio calculado
 
@@ -471,12 +479,15 @@ ESCALAR A SUPERVISOR CUANDO:
   - Condiciones especiales no previstas
 
 PROHIBIDO AL AGENTE:
+  - Cotizar en dolares (USD) — SIEMPRE en RD$
   - Revelar comision de Emovils o pago al conductor
   - Cotizar por debajo de RD$300
   - Confirmar reserva sin: nombre, telefono, origen, destino, fecha y hora
   - Dar descuentos mayores al 10% sin autorizacion
   - Prometer disponibilidad sin validar
   - Inventar precios si faltan datos
+  - Inventar kilometros o tiempos de ruta — usa los rangos de la tabla
+  - Aplicar la formula urbana si no tienes km y minutos reales — usa el rango orientativo
 """
 
 
