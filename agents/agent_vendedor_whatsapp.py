@@ -1,127 +1,90 @@
 """
-Emovils — Agente Vendedor WhatsApp v2
-Usa el motor de cotizacion (pricing_engine) para calcular precios
-de forma automatica, alineada al mercado y con escalamiento correcto.
+Emovils OPC — Agente 3: Vendedor WhatsApp (Monserrat)
+Responsabilidad: Califica leads, cotiza, maneja objeciones,
+da seguimiento y empuja al cierre. Canal principal de ventas.
+
+LLM: OpenAI GPT-4o-mini (más económico, muy rápido)
+Voz: OpenAI TTS "nova" (disponible bajo demanda)
+QR: QR.io para verificación de recogida
+
+Flujo: WhatsApp → preguntas básicas → cotización → confirmación → pago → reserva → QR
 """
-import anthropic
+import os
 import logging
-from config.settings import ANTHROPIC_API_KEY, CLAUDE_MODEL
+import secrets
+from openai import OpenAI
+from config.settings import OPENAI_API_KEY, OPENAI_MODEL, ANTHROPIC_API_KEY
 from lib.airtable_api import (
     create_lead, update_lead_status, get_lead_by_whatsapp,
     create_reserva, LeadStatus
 )
-from lib.whatsapp_api import send_text, SCRIPTS, parse_webhook_event
-from lib.pricing_engine import (
-    calculate_fare, FareInput, PRICING_RULES_FOR_AGENT,
-    get_waiting_fee_table_text, PRICING_CONFIG
-)
+from lib.whatsapp_api import send_text, send_quote, SCRIPTS, parse_webhook_event
+from lib.paypal_api import get_payment_link
+from lib.google_maps import estimate_price
+from lib.qr_generator import generate_pickup_qr, generate_qr_message
+from lib.voice_agent import send_voice_message, should_send_voice
 from workflows.wf_reserva_urgente import detectar_urgencia, PROMPT_MODO_URGENTE
 from workflows.wf_followup_sequence import schedule_followup_sequence
-from lib.database import crear_reserva as db_crear_reserva, RESERVAS as DB_RESERVAS
-from lib.google_maps import calculate_route_price
 
 logger = logging.getLogger(__name__)
-client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
+# Cliente OpenAI — LLM principal
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-SYSTEM_PROMPT = (
-    "Eres Monserrat, asistente de traslados ejecutivos de Emovils en Republica Dominicana.\n"
-    "Eres una persona real — cálida, profesional, atenta. No eres un bot ni un sistema automatico.\n"
-    "Hablas con naturalidad, como lo haria una ejecutiva de atención al cliente de alto nivel.\n\n"
+SYSTEM_PROMPT = """Eres Monserrat, Agente de Reservas de Emovils OPC, empresa de movilidad privada premium en República Dominicana.
 
-    "EMOVILS opera traslados privados 24/7: aeropuerto, hoteles, empresas, eventos, interurbanos.\n"
-    "Sedan: hasta 4 pasajeros. Van: hasta 7 pasajeros. Precio confirmado antes del servicio.\n\n"
+OPERAMOS 24/7 — NUNCA digas que estás fuera de horario. Siempre disponible.
 
-    "PERSONALIDAD DE MONSERRAT:\n"
-    "- Cálida pero profesional. Usa frases como: Con gusto le ayudo, Por supuesto, Perfecto.\n"
-    "- Escucha activamente. Si el cliente ya dio un dato, no lo pidas de nuevo.\n"
-    "- Responde con naturalidad, no con listas ni formatos de bot.\n"
-    "- Si alguien pregunta algo fuera de traslados (clima, noticias, chistes, etc.), reencamina\n"
-    "  con amabilidad: Lo mio es coordinar traslados ejecutivos — en eso si le puedo ayudar mucho.\n"
-    "  ¿Tiene algun viaje o traslado que necesite coordinar?\n\n"
+TU FUNCIÓN:
+- Atender a todo cliente que escriba, a cualquier hora
+- Recopilar TODOS los datos necesarios para la reserva
+- Confirmar precio y crear la reserva en el sistema
+- Informar al cliente que un supervisor revisará y asignará conductor
+- Manejar objeciones con confianza y cerrar
 
-    "FLUJO DE ATENCION (sigue este orden EXACTO):\n"
-    "1. Saluda segun la hora del dia en Republica Dominicana (America/Santo_Domingo):\n"
-    "   - 6:00 AM a 11:59 AM  → Buenos días\n"
-    "   - 12:00 PM a 7:59 PM  → Buenas tardes\n"
-    "   - 8:00 PM a 5:59 AM   → Buenas noches\n"
-    "   Saludo completo exacto: [Buenos días/tardes/noches], mi nombre es Monserrat, "
-    "bienvenido/a a Emovils Transporte Ejecutivo. ¿En qué le puedo apoyar hoy?\n"
-    "   Si no sabes la hora exacta, usa la hora del servidor que se incluye en el contexto.\n"
-    "2. Pregunta origen y destino\n"
-    "3. Pregunta cuantos pasajeros\n"
-    "4. Pregunta FECHA Y HORA del servicio (OBLIGATORIO antes de cotizar — el precio cambia de noche)\n"
-    "5. Con origen, destino, pasajeros, fecha Y hora confirmados: presenta el precio LIMPIO\n"
-    "6. Pregunta forma de pago: efectivo, tarjeta o en linea\n"
-    "7. Solicita nombre completo del pasajero\n"
-    "8. Solicita telefono explicando que es para el chofer:\n"
-    "   Por favor, ¿me puede dar su número? Es para que el chofer pueda contactarle al llegar.\n"
-    "9. Confirma todos los datos con el cliente y registra la reserva\n"
-    "10. Envia confirmacion calida con todos los detalles\n\n"
+FLUJO DE RESERVA (sigue este orden):
+1. Saluda calurosamente y pregunta qué necesitan
+2. Recopila los datos de la reserva (ver lista abajo)
+3. Confirma precio al cliente
+4. Crea la reserva → sistema notifica al supervisor
+5. Informa: "Su reserva fue registrada. Un supervisor la revisará y le asignará conductor en breve."
+6. Envía QR de verificación de recogida
 
-    "VEHICULOS:\n"
-    "- 1 a 4 pasajeros: sedan\n"
-    "- 5 a 7 pasajeros: van\n"
-    "- Mas de 7: coordinar con supervisor\n"
-    "- Nunca recomiendes vehiculo sin saber cuantos son\n\n"
+PRODUCTO PRINCIPAL: Emovils Airport
+- Servicio: Traslado privado desde/hacia AILA/SDQ (Santo Domingo)
+- Precio base: USD $25 (sencillo), $45 (ida y vuelta)
+- Incluye: vehículo confirmado, chofer identificado, seguimiento WhatsApp
+- Promesa: "Precio confirmado antes de su llegada. Sin sorpresas."
 
-    "PRECIO — CRITICO:\n"
-    "- Solo da el monto final. NUNCA la formula ni el calculo.\n"
-    "  BIEN: El traslado le quedaria en RD$1,800\n"
-    "  MAL: RD$300 + (9km x RD$50) = RD$750  ← PROHIBIDO\n"
-    "- Precio minimo: RD$300\n"
-    "- SIEMPRE en pesos dominicanos (RD$). Nunca en dolares.\n"
-    "- Necesitas FECHA Y HORA antes de dar precio (hay recargo nocturno 9PM-6AM)\n\n"
+DATOS QUE DEBES RECOPILAR:
+1. Nombre completo del pasajero
+2. Fecha de llegada/salida
+3. Hora estimada
+4. Punto de recogida (aeropuerto u otro)
+5. Destino final
+6. Cantidad de pasajeros
+7. Tipo de servicio (ida / regreso / ida y vuelta)
+8. Número de vuelo y aerolínea (si es aeropuerto)
+9. Cantidad de maletas
+10. Forma de pago preferida (Zelle, PayPal, tarjeta, efectivo)
 
-    + PRICING_RULES_FOR_AGENT +
+MANEJO DE OBJECIONES:
+- "Es muy caro" → Comparar con el costo/estrés de improvisar; precio confirmado, sin sorpresas
+- "Tengo a alguien conocido" → Respetar, pero preguntar si tienen plan B confirmado
+- "¿Es seguro?" → Chofer identificado, empresa formal, seguimiento por WhatsApp
+- "Lo pienso" → Los cupos se llenan; la reserva no requiere pago total ahora
 
-    "\nFORMA DE PAGO:\n"
-    "- Efectivo o tarjeta: reserva confirmada, pago al momento del servicio\n"
-    "- En linea: enlace de pago → pago confirmado → QR de servicio\n\n"
+TONO: Profesional, cálido, seguro. Máximo 3 oraciones por mensaje. Sin emojis excesivos.
+Responde siempre en español. Sé conciso, directo y orientado al cierre."""
 
-    "CONFIRMACION DE RESERVA (efectivo o tarjeta):\n"
-    "¡Listo! Su reserva está confirmada.\n"
-    "Vehiculo: [Sedan/Van] | Fecha: [fecha] | Hora: [hora]\n"
-    "Recogida: [origen] → Destino: [destino] | Pasajeros: [n]\n"
-    "Total: RD$[monto] | Pago: [forma]\n"
-    "Le llegará un QR de servicio. Al llegar el vehículo, escanée el QR de la puerta — \n"
-    "si aparece ✅ verde de Emovils, aborde con confianza.\n\n"
-
-    "CONFIRMACION (pago en linea pendiente):\n"
-    "Perfecto, su solicitud quedó registrada. Le enviamos el enlace de pago en un momento.\n"
-    "Una vez confirmado el pago, le llegará su QR de servicio.\n\n"
-
-    "HISTORIAL DE CONVERSACION:\n"
-    "- TIENES ACCESO COMPLETO a todos los mensajes anteriores. Leelos antes de pedir datos.\n"
-    "- Si el cliente ya dio origen, destino, nombre o cualquier dato, NO lo pidas de nuevo.\n"
-    "- Ubicaciones de WhatsApp aparecen como: [UBICACION COMPARTIDA] Lat: X, Lon: Y\n"
-    "- NUNCA digas que no tienes acceso a mensajes anteriores.\n\n"
-
-    "PROHIBIDO:\n"
-    "- Mostrar formulas, calculos o desgloses de precio al cliente\n"
-    "- Dar precio sin conocer la hora del servicio\n"
-    "- Cotizar en dolares\n"
-    "- Revelar margenes o comisiones internas\n"
-    "- Cotizar por debajo de RD$300\n"
-    "- Confirmar reserva sin todos los datos obligatorios\n"
-    "- Decir que eres un bot, sistema o inteligencia artificial\n"
-    "- Inventar rutas, destinos o servicios que Emovils no ofrece\n"
-    "- Ofrecer descuentos o promociones no aprobados\n"
-    "- Proponer servicios distintos a traslados privados (tours, delivery, mensajeria)\n"
-    "- Cotizar fuera de Republica Dominicana\n\n"
-
-    "TONO: Monserrat es cálida, segura, concisa. Máximo 4 oraciones por respuesta. "
-    "Siempre en español, salvo que el cliente escriba en otro idioma — en ese caso, responde en ese idioma."
-)
-
-CONVERSATION_HISTORY = {}
-LOCATION_CACHE = {}  # wa_number -> {'lat': float, 'lon': float}
-BOOKING_CREATED = {}  # wa_number -> booking_id (para no crear duplicados)
+CONVERSATION_HISTORY = {}  # En producción, usar Redis o Airtable
+BOOKING_CONFIRMED = {}     # Trackea si ya se envió QR para un número
 
 
 def process_incoming_message(webhook_payload: dict) -> dict:
     """
     Procesa un mensaje entrante de WhatsApp y genera respuesta.
+    Este es el endpoint principal del bot.
     """
     msg = parse_webhook_event(webhook_payload)
     if not msg:
@@ -131,39 +94,33 @@ def process_incoming_message(webhook_payload: dict) -> dict:
     message_text = msg["text"]
     contact_name = msg.get("contact_name", "")
 
-    logger.info("Mensaje recibido de %s***: %s", wa_number[:6], message_text[:50])
+    logger.info(f"Mensaje recibido de {wa_number[:6]}***: {message_text[:50]}")
 
-    # Airtable (no-fatal)
-    try:
-        existing_lead = get_lead_by_whatsapp(wa_number)
-        if not existing_lead:
-            create_lead(
-                whatsapp=wa_number,
-                nombre=contact_name,
-                canal_origen="whatsapp_inbound",
-                producto="ejecutivo"
-            )
-    except Exception as e:
-        logger.warning("Airtable error (non-fatal): %s", e)
+    # Verificar si el lead existe en Airtable
+    existing_lead = get_lead_by_whatsapp(wa_number)
+    if not existing_lead:
+        create_lead(
+            whatsapp=wa_number,
+            nombre=contact_name,
+            canal_origen="whatsapp_inbound",
+            producto="airport"
+        )
 
-    # Historial de conversacion
+    # Obtener o crear historial de conversación
     if wa_number not in CONVERSATION_HISTORY:
         CONVERSATION_HISTORY[wa_number] = []
 
-    CONVERSATION_HISTORY[wa_number].append({"role": "user", "content": message_text})
+    turn_number = len(CONVERSATION_HISTORY[wa_number]) // 2
 
-    # Cache location if client shared WhatsApp location
-    if msg.get("type") == "location":
-        lat = msg.get("latitude")
-        lon = msg.get("longitude")
-        if lat and lon:
-            LOCATION_CACHE[wa_number] = {"lat": float(lat), "lon": float(lon)}
-            logger.info("Ubicacion guardada para %s***: %.4f, %.4f", wa_number[:6], lat, lon)
+    CONVERSATION_HISTORY[wa_number].append({
+        "role": "user",
+        "content": message_text
+    })
 
-    # Urgencia
+    # Detectar si es urgente (viaje hoy / ahora)
     es_urgente = detectar_urgencia(message_text)
 
-    # Generar respuesta
+    # Generar respuesta con OpenAI
     response_text = generate_sales_response(
         wa_number=wa_number,
         message=message_text,
@@ -171,11 +128,21 @@ def process_incoming_message(webhook_payload: dict) -> dict:
         urgente=es_urgente
     )
 
-    CONVERSATION_HISTORY[wa_number].append({"role": "assistant", "content": response_text})
-    send_text(wa_number, response_text)
+    CONVERSATION_HISTORY[wa_number].append({
+        "role": "assistant",
+        "content": response_text
+    })
 
-    # Intentar crear reserva automaticamente si el agente acaba de confirmar
-    _intentar_crear_reserva(wa_number, response_text, CONVERSATION_HISTORY[wa_number])
+    # Enviar respuesta: voz en primer saludo, texto el resto
+    if should_send_voice(message_text, turn_number):
+        send_voice_message(wa_number, response_text)
+    else:
+        send_text(wa_number, response_text)
+
+    # Detectar reserva confirmada y enviar QR (solo una vez por número)
+    if _is_booking_confirmed(response_text) and not BOOKING_CONFIRMED.get(wa_number):
+        _send_booking_qr(wa_number, contact_name)
+        BOOKING_CONFIRMED[wa_number] = True
 
     return {
         "status": "responded",
@@ -184,310 +151,110 @@ def process_incoming_message(webhook_payload: dict) -> dict:
     }
 
 
-
-
-# ─────────────────────────────────────────────
-# CREACION AUTOMATICA DE RESERVA
-# ─────────────────────────────────────────────
-
-EXTRACTION_PROMPT = """Analiza esta conversacion de WhatsApp de Emovils y extrae los datos si estan TODOS presentes.
-
-Responde UNICAMENTE con JSON valido. Si falta algun dato obligatorio responde: {"completo": false}
-
-Datos obligatorios: nombre, telefono, origen, destino, fecha, hora, pasajeros, precio, forma_pago, confirmado
-
-{
-  "completo": true/false,
-  "confirmado": true/false,  // el cliente dijo si/confirmo/de acuerdo/correcto/ok
-  "nombre": "...",
-  "telefono": "...",
-  "whatsapp": "...",  // numero de whatsapp del cliente
-  "origen": "...",
-  "destino": "...",
-  "fecha": "...",
-  "hora": "...",
-  "pasajeros": 1,
-  "vehiculo": "sedan|van",
-  "precio": 1500,  // numero sin simbolos
-  "forma_pago": "efectivo|tarjeta|en linea"
-}"""
-
-
-def _intentar_crear_reserva(wa_number: str, last_response: str, history: list) -> None:
-    """
-    Despues de cada respuesta del agente, verifica si el cliente confirmo la reserva.
-    Si si, extrae los datos y crea la reserva automaticamente.
-    Solo se ejecuta una vez por conversacion (evita duplicados).
-    """
-    import os
-    import json as json_mod
-
-    # No crear si ya existe reserva para este numero
-    if wa_number in BOOKING_CREATED:
-        return
-
-    # Solo intentar si la respuesta del agente contiene palabras de confirmacion
-    confirmacion_words = ["reserva ha sido confirmada", "reserva fue confirmada",
-                          "reserva confirmada", "su qr", "le enviaremos su qr",
-                          "solicitud esta registrada", "confirmacion de su reserva"]
-    if not any(w in last_response.lower() for w in confirmacion_words):
-        return
-
-    # Extraer datos estructurados de la conversacion con Claude
-    try:
-        base_url = os.getenv("BASE_URL", "https://emovils-opc-production.up.railway.app")
-        msgs = history[-20:]
-        conv_text = "\n".join(
-            f"{'Cliente' if m['role']=='user' else 'Emovils'}: {m['content']}"
-            for m in msgs
-            if isinstance(m.get("content"), str)
-        )
-
-        extraction = client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=400,
-            system=EXTRACTION_PROMPT,
-            messages=[{"role": "user", "content": conv_text + f"\n\nNumero WhatsApp del cliente: {wa_number}"}]
-        )
-        raw = extraction.content[0].text.strip()
-
-        # Limpiar markdown si Claude lo envuelve en ```json
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        datos = json_mod.loads(raw.strip())
-
-        if not datos.get("completo") or not datos.get("confirmado"):
-            return
-
-        # Asegurar whatsapp del cliente
-        datos["whatsapp"] = datos.get("whatsapp") or wa_number
-
-        # Crear reserva en la base de datos
-        reserva = db_crear_reserva(datos)
-        bid = reserva["booking_id"]
-        token = reserva["token_cliente"]
-        link = f"{base_url}/b/{bid}?t={token}"
-
-        BOOKING_CREATED[wa_number] = bid
-        logger.info("Reserva creada automaticamente: %s para %s", bid, wa_number[:6])
-
-        # Enviar link QR al cliente
-        msg_qr = (
-            f"Su reserva ha quedado registrada.\n"
-            f"Numero de reserva: {bid}\n\n"
-            f"Aqui puede ver su QR de embarque y los detalles:\n{link}\n\n"
-            f"Cuando llegue el vehiculo, escanee el QR en la puerta para verificar "
-            f"que es su conductor asignado."
-        )
-        send_text(wa_number, msg_qr)
-
-    except Exception as e:
-        logger.warning("Error creando reserva automatica: %s", e)
-
-
-def _try_calculate_price(wa_number: str, history: list) -> str:
-    """
-    Intenta calcular el precio con Google Maps si tenemos ubicacion + destino + hora.
-    Retorna el [PRECIO_CALCULADO] string para inyectar en el system prompt, o "" si no hay suficiente info.
-    """
-    location = LOCATION_CACHE.get(wa_number)
-    if not location:
-        return ""
-
-    # Extract destination and hour from conversation history (last 20 messages)
-    full_text = " ".join(
-        m["content"] for m in history[-20:] if isinstance(m.get("content"), str)
-    ).lower()
-
-    # Try to detect destination from conversation
-    destination = None
-    aeropuerto_keywords = ["aeropuerto", "aila", "sdq", "las americas", "vuelo"]
-    if any(k in full_text for k in aeropuerto_keywords):
-        destination = "Aeropuerto Internacional Las Americas, Santo Domingo, DO"
-
-    # Look for common destinations mentioned
-    if not destination:
-        dest_hints = ["punta cana", "santiago", "la romana", "samana", "boca chica",
-                      "zona colonial", "piantini", "naco", "bella vista"]
-        for hint in dest_hints:
-            if hint in full_text:
-                destination = hint + ", Republica Dominicana"
-                break
-
-    if not destination:
-        return ""
-
-    # Try to detect hour from conversation
-    import re
-    service_hour = None
-    hour_matches = re.findall(r'\b(\d{1,2})(?::(?:\d{2}))?\s*(?:am|pm|de la noche|de la manana|madrugada)?', full_text)
-    for hm in hour_matches:
-        try:
-            h = int(hm)
-            if 0 <= h <= 23:
-                service_hour = h
-                break
-        except Exception:
-            pass
-    # Night keywords
-    if service_hour is None and any(k in full_text for k in ["noche", "madrugada", "pm", "medianoche"]):
-        service_hour = 22  # assume night if night words present
-
-    # Detect passengers
-    passengers = 1
-    pax_match = re.search(r'(\d+)\s*(?:pasajeros?|personas?|pax)', full_text)
-    if pax_match:
-        passengers = int(pax_match.group(1))
-
-    # Call Google Maps
-    origin_str = f"{location['lat']},{location['lon']}"
-    try:
-        result = calculate_route_price(
-            origin=origin_str,
-            destination=destination,
-            passengers=passengers,
-            service_hour=service_hour
-        )
-        if "error" not in result:
-            return result["note_for_agent"]
-    except Exception as e:
-        logger.warning("Error calculando precio Maps: %s", e)
-
-    return ""
-
-
 def generate_sales_response(wa_number: str, message: str, history: list, urgente: bool = False) -> str:
     """
-    Genera la respuesta usando Claude con el SYSTEM_PROMPT actualizado.
+    Genera la respuesta de Monserrat usando OpenAI GPT-4o-mini.
+    Si es urgente, usa el prompt de modo rápido para capturar datos mínimos.
     """
-    import datetime, zoneinfo
-    tz_rd = zoneinfo.ZoneInfo("America/Santo_Domingo")
-    now_rd = datetime.datetime.now(tz_rd)
-    hora_actual = now_rd.strftime("%H:%M")
-    hora_int = now_rd.hour
-    if 6 <= hora_int < 12:
-        saludo_hora = "Buenos días"
-    elif 12 <= hora_int < 20:
-        saludo_hora = "Buenas tardes"
-    else:
-        saludo_hora = "Buenas noches"
+    messages = history[-10:]  # Últimos 10 mensajes para contexto
 
-    messages = history[-20:]
-    system = SYSTEM_PROMPT + (
-        f"\n\n[CONTEXTO DEL SISTEMA — hora actual en RD: {hora_actual} → saludo correcto: {saludo_hora}]"
-    )
+    system = SYSTEM_PROMPT
     if urgente:
-        system = system + "\n\n" + PROMPT_MODO_URGENTE
-        logger.info("Modo URGENTE activado para %s***", wa_number[:6])
+        system = SYSTEM_PROMPT + "\n\n" + PROMPT_MODO_URGENTE
+        logger.info(f"Modo URGENTE activado para {wa_number[:6]}***")
 
-    # Try Google Maps price calculation if we have location + some destination context
-    price_note = _try_calculate_price(wa_number, history)
-    if price_note:
-        system = system + "\n\n" + price_note
-        logger.info("Precio calculado para %s***: %s", wa_number[:6], price_note[:80])
-
-    response = client.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=600,
-        system=system,
-        messages=messages
+    response = client.chat.completions.create(
+        model=OPENAI_MODEL,
+        max_tokens=500,
+        messages=[
+            {"role": "system", "content": system},
+            *messages
+        ]
     )
-    return response.content[0].text
+    return response.choices[0].message.content
 
 
-def quote_fare(
-    wa_number: str,
-    origin: str,
-    destination: str,
-    passengers: int,
-    distance_km: float = 0,
-    time_minutes: float = 0,
-    service_type: str = "urban",
-    vehicle_type: str = "auto",
-    trip_time: str = "",
-    extra_stops: int = 0,
-    waiting_minutes: float = 0,
-    is_round_trip: bool = False,
-    is_airport: bool = False,
-    airport_zone: str = ""
-) -> dict:
+def _is_booking_confirmed(response_text: str) -> bool:
     """
-    Calcula y envia cotizacion usando el motor de precios.
+    Detecta si el mensaje de Monserrat indica que se creó una reserva.
     """
-    inp = FareInput(
-        origin=origin,
-        destination=destination,
-        distance_km=distance_km,
-        estimated_time_minutes=time_minutes,
-        passengers=passengers,
-        service_type=service_type,
-        vehicle_type=vehicle_type,
-        time=trip_time,
-        extra_stops=extra_stops,
-        waiting_minutes=waiting_minutes,
-        is_round_trip=is_round_trip,
-        is_airport=is_airport,
-        airport_zone=airport_zone
-    )
+    keywords = [
+        "reserva fue registrada",
+        "reserva ha sido registrada",
+        "reserva confirmada",
+        "su reserva",
+        "supervisor la revisará",
+        "le asignará conductor",
+        "EMV-"
+    ]
+    text_lower = response_text.lower()
+    return any(kw.lower() in text_lower for kw in keywords)
 
-    result = calculate_fare(inp)
 
-    send_text(wa_number, result.client_message)
+def _send_booking_qr(wa_number: str, nombre: str) -> None:
+    """
+    Genera QR de verificación de recogida y lo envía al pasajero.
+    """
+    try:
+        booking_id = f"EMV-{wa_number[-4:]}-{secrets.token_hex(3).upper()}"
+        token = secrets.token_urlsafe(16)
 
-    if result.requires_supervisor:
-        logger.info("Escalamiento a supervisor para %s***: %s", wa_number[:6], result.supervisor_reason)
-    else:
-        logger.info(
-            "Cotizacion enviada a %s***: RD$%s (%s) %s -> %s",
-            wa_number[:6], result.final_price_dop, result.recommended_vehicle, origin, destination
+        qr_data = generate_pickup_qr(
+            booking_id=booking_id,
+            token=token,
+            nombre=nombre or "Pasajero",
+            fecha="Próximo viaje"
         )
 
-    return {
-        "status": "supervisor_required" if result.requires_supervisor else "quoted",
-        "requires_supervisor": result.requires_supervisor,
-        "supervisor_reason": result.supervisor_reason,
-        "vehicle": result.recommended_vehicle,
-        "price_dop": result.final_price_dop,
-        "price_usd": result.final_price_usd
-    }
+        qr_message = generate_qr_message({
+            "pasajero": nombre or "Pasajero",
+            "booking_id": booking_id,
+            "fecha": "Próximo viaje",
+            "qr_url": qr_data.get("qr_url", "")
+        })
+
+        send_text(wa_number, qr_message)
+        logger.info(f"QR enviado a {wa_number[:6]}*** — booking {booking_id}")
+
+    except Exception as e:
+        logger.error(f"Error enviando QR a {wa_number[:6]}***: {e}")
 
 
 def qualify_lead(wa_number: str, conversation_summary: str) -> dict:
-    """Califica un lead despues de la conversacion inicial."""
-    prompt = (
-        "Analiza esta conversacion de WhatsApp con un prospecto de Emovils:\n\n"
-        + conversation_summary
-        + "\n\nEvalua:\n"
-        "1. Nivel de interes (1-10)\n"
-        "2. Tiene fecha de viaje confirmada? (si/no/no menciono)\n"
-        "3. Menciono precio como objecion? (si/no)\n"
-        "4. Siguiente accion: COTIZAR / PREGUNTAR_MAS / SEGUIMIENTO / PERDIDO\n\n"
-        "Responde en formato JSON."
-    )
-    response = client.messages.create(
-        model=CLAUDE_MODEL,
+    """
+    Califica un lead después de la conversación inicial.
+    Retorna scoring y próxima acción recomendada.
+    """
+    prompt = f"""
+    Analiza esta conversación de WhatsApp con un prospecto de Emovils Airport:
+
+    {conversation_summary}
+
+    Evalúa:
+    1. Nivel de interés (1-10)
+    2. ¿Tiene fecha de viaje confirmada? (sí/no/no mencionó)
+    3. ¿Mencionó precio como objeción? (sí/no)
+    4. ¿Ya tiene alternativa de transporte? (sí/no/no mencionó)
+    5. Siguiente acción recomendada:
+       - COTIZAR: tiene toda la info necesaria
+       - PREGUNTAR_MAS: necesita más datos
+       - SEGUIMIENTO: respondió pero no dio info
+       - PERDIDO: claramente no interesado
+
+    Responde en formato JSON.
+    """
+
+    response = client.chat.completions.create(
+        model=OPENAI_MODEL,
         max_tokens=400,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": prompt}]
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt}
+        ]
     )
-    return {"qualification": response.content[0].text}
+    return {"qualification": response.choices[0].message.content}
 
 
-def send_followup(wa_number: str, reason: str = "no_response") -> dict:
-    """Envia mensaje de seguimiento si el cliente no ha respondido."""
-    msg = SCRIPTS["seguimiento_no_responde"]
-    if reason == "not_paid":
-        msg = (
-            "Hola, le escribo para confirmar si pudo completar la reserva.\n\n"
-            "Si tiene alguna pregunta sobre el servicio o la forma de pago, con gusto le ayudamos."
-        )
-    send_text(wa_number, msg)
-    return {"status": "followup_sent", "reason": reason}
-
-
-# Alias de compatibilidad con main.py
 def send_quotation(
     wa_number: str,
     nombre: str,
@@ -495,41 +262,91 @@ def send_quotation(
     hora: str,
     origen: str,
     destino: str,
-    pasajeros: int = 1,
-    km: float = 0
+    pasajeros: int = 1
 ) -> dict:
-    """Alias para compatibilidad con main.py — usa quote_fare internamente."""
-    return quote_fare(
-        wa_number=wa_number,
-        origin=origen,
-        destination=destino,
-        passengers=pasajeros,
-        distance_km=km,
-        time_minutes=km * 3 if km > 0 else 0
+    """
+    Genera y envía cotización con precio y link de pago.
+    """
+    # Calcular precio con Google Maps
+    price_info = estimate_price(origen, destino, pasajeros)
+    precio = price_info.get("price_usd", 25.0)
+
+    # Crear link de pago en PayPal
+    booking_id = f"EMV-{wa_number[-4:]}-{fecha.replace('-', '')}"
+    paypal_link = get_payment_link(
+        product_key="airport_sencillo",
+        customer_name=nombre,
+        booking_id=booking_id,
+        custom_price=precio
     )
+
+    # Enviar cotización por WhatsApp
+    send_quote(
+        to=wa_number,
+        nombre=nombre,
+        fecha=fecha,
+        hora=hora,
+        origen=origen,
+        destino=destino,
+        precio_usd=precio,
+        paypal_link=paypal_link
+    )
+
+    # Actualizar lead en Airtable
+    lead = get_lead_by_whatsapp(wa_number)
+    if lead:
+        update_lead_status(lead["id"], LeadStatus.COTIZADO, f"Cotización ${precio} enviada")
+
+    logger.info(f"Cotización enviada a {wa_number[:6]}***: ${precio} — {origen} → {destino}")
+    return {"status": "quoted", "precio_usd": precio, "payment_url": paypal_link}
+
+
+def send_followup(wa_number: str, reason: str = "no_response") -> dict:
+    """Envía mensaje de seguimiento si el cliente no ha respondido."""
+    followup_message = SCRIPTS["seguimiento_no_responde"]
+
+    if reason == "not_paid":
+        followup_message = """Hola, le escribo para confirmar si pudo completar la reserva.
+
+El link de pago sigue activo. Si tiene alguna pregunta sobre el servicio o el proceso de pago, con gusto le ayudamos."""
+
+    send_text(wa_number, followup_message)
+    return {"status": "followup_sent", "reason": reason}
 
 
 def handle_objection(wa_number: str, objection_type: str) -> str:
-    """Maneja objeciones del cliente."""
+    """Genera respuesta personalizada para una objeción específica."""
     objections = {
-        "precio_caro": (
-            "Entendemos la consulta sobre el precio.\n\n"
-            "Con Emovils usted tiene precio confirmado antes del servicio, "
-            "chofer identificado y sin sorpresas. El precio es fijo y final."
-        ),
-        "tiene_conocido": (
-            "Perfecto, si ya tiene transporte coordinado, excelente.\n\n"
-            "Como plan B: si ese arreglo falla, estamos disponibles 24/7."
-        ),
-        "inseguridad": (
-            "Nuestros choferes estan identificados. Al confirmar, enviamos "
-            "nombre del chofer, placa del vehiculo y WhatsApp directo."
-        ),
-        "lo_pienso": (
-            "Claro, tomese su tiempo.\n\n"
-            "Cuando sea necesario, escribanos y le coordinamos de inmediato."
-        )
+        "precio_caro": """Entendemos que $25 puede parecer un poco más que otras opciones.
+
+La diferencia es que con Emovils usted tiene:
+✓ Precio confirmado ANTES de aterrizar
+✓ Chofer identificado esperándole
+✓ No hay negociación al salir cansado del vuelo
+✓ Seguimiento por WhatsApp
+
+¿Le parece si comparamos opciones y ve cuál le conviene más?""",
+
+        "tiene_conocido": """Perfecto, si ya tiene transporte coordinado, ¡excelente!
+
+Solo como plan B: si por alguna razón ese arreglo falla, estamos disponibles. Muchos clientes nos contactan en último momento y a veces no tenemos disponibilidad.
+
+¿Le guarda el número por si acaso?""",
+
+        "inseguridad": """Nuestros choferes están identificados y registrados. Al confirmar su reserva, le enviamos:
+- Foto y nombre del chofer
+- Placa del vehículo
+- WhatsApp directo del chofer
+
+Empresa formal con historial de clientes. ¿Le cuento más sobre cómo funciona el servicio?""",
+
+        "lo_pienso": """Claro, tómese su tiempo.
+
+Solo le digo que los cupos para fechas de fin de semana y temporada alta se llenan con anticipación. Si su viaje es pronto, le recomiendo reservar aunque sea con un depósito.
+
+¿Cuándo es su fecha de llegada exactamente?"""
     }
+
     response_text = objections.get(objection_type, SCRIPTS["bienvenida_cotizacion"])
     send_text(wa_number, response_text)
     return response_text
