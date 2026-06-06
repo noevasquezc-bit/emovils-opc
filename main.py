@@ -25,6 +25,7 @@ from lib.database import (
     registrar_vehiculo, obtener_vehiculo,
     obtener_reserva_activa_de_vehiculo, RESERVAS, VEHICULOS
 )
+from lib.dashboard_html import DASHBOARD_HTML
 from lib.html_pages import (
     pagina_reserva_cliente, pagina_verificacion_vehiculo, pagina_conductor_scan
 )
@@ -341,6 +342,26 @@ def api_vehiculo(vehicle_id):
     if not v:
         return jsonify({"error": "Vehiculo no encontrado"}), 404
     return jsonify(v)
+
+
+# ─────────────────────────────────────────────
+# DASHBOARD DEL DUEÑO
+# ─────────────────────────────────────────────
+@app.route("/dashboard", methods=["GET"])
+def dashboard():
+    """Panel de control para el dueño — ver reservas, asignar conductores."""
+    return _html(DASHBOARD_HTML)
+
+
+@app.route("/api/dashboard", methods=["GET"])
+def api_dashboard():
+    """Datos en tiempo real para el dashboard."""
+    return jsonify({
+        "reservas": list(RESERVAS.values()),
+        "vehiculos": list(VEHICULOS.values()),
+        "total_reservas": len(RESERVAS),
+        "total_vehiculos": len(VEHICULOS),
+    })
 
 
 # ─────────────────────────────────────────────
