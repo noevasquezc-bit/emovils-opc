@@ -1,79 +1,103 @@
 """
-Emovils — QR Generator
-Genera imagenes QR para clientes y vehiculos.
-Usa qrcode si esta disponible, sino retorna solo la URL.
+Emovils OPC — QR Generator via QR.io
+Genera QR codes para verificación de recogida de pasajeros.
+API: https://api.qr.io
 """
+import requests
 import logging
-import base64
-from typing import Optional
-import io
+import os
 
 logger = logging.getLogger(__name__)
 
+QRIO_API_KEY = os.getenv("QRIO_API_KEY", "pyvwUlSI1QFACKbD2WXu")
+QRIO_BASE_URL = "https://api.qr.io/v1"
+BACKEND_URL = os.getenv("BACKEND_URL", "https://emovils-bot-v2-production.up.railway.app")
 
-def generate_qr_base64(url: str) -> Optional[str]:
+
+def generate_pickup_qr(booking_id: str, token: str, nombre: str, fecha: str) -> dict:
     """
-    Genera un QR en base64 a partir de una URL.
-    Retorna string base64 o None si la libreria no esta disponible.
+    Genera un QR de recogida para el pasajero via QR.io.
+    El chofer escanea este QR al llegar para verificar identidad.
+    Retorna: { "qr_url": "...", "verify_url": "...", "image_url": "..." }
     """
+    verify_url = f"{BACKEND_URL}/verify/{booking_id}?t={token}"
+
+    payload = {
+        "data": verify_url,
+        "config": {
+            "body": "square",
+            "eye": "frame0",
+            "eyeBall": "ball0",
+            "bodyColor": "#1a1a2e",
+            "bgColor": "#FFFFFF",
+            "eye1Color": "#4f9cf9",
+            "eye2Color": "#4f9cf9",
+            "eye3Color": "#4f9cf9",
+            "eyeBall1Color": "#1a1a2e",
+            "eyeBall2Color": "#1a1a2e",
+            "eyeBall3Color": "#1a1a2e",
+            "logo": "",
+            "logoMode": "default"
+        },
+        "size": 400,
+        "download": False,
+        "file": "png"
+    }
+
     try:
-        import qrcode
-        from PIL import Image
-        qr = qrcode.QRCode(
-            version=1,
-            error_correction=qrcode.constants.ERROR_CORRECT_H,
-            box_size=10,
-            border=4
+        resp = requests.post(
+            f"{QRIO_BASE_URL}/create",
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {QRIO_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            timeout=15
         )
-        qr.add_data(url)
-        qr.make(fit=True)
-        img = qr.make_image(fill_color="black", back_color="white")
-        buffer = io.BytesIO()
-        img.save(buffer, format="PNG")
-        return base64.b64encode(buffer.getvalue()).decode("utf-8")
-    except ImportError:
-        logger.warning("qrcode/PIL no instalado. Retornando URL directamente.")
-        return None
+        resp.raise_for_status()
+        data = resp.json()
+
+        image_url = data.get("imageUrl") or data.get("url") or data.get("qr_url") or ""
+        logger.info(f"QR generado para reserva {booking_id}: {image_url}")
+
+        return {
+            "qr_url": image_url,
+            "verify_url": verify_url,
+            "booking_id": booking_id,
+            "pasajero": nombre,
+            "fecha": fecha
+        }
+
     except Exception as e:
-        logger.error("Error generando QR: %s", e)
-        return None
+        logger.error(f"Error generando QR via QR.io: {e}")
+        # Fallback: usar Google Charts QR (siempre disponible)
+        fallback_url = f"https://chart.googleapis.com/chart?cht=qr&chs=400x400&chl={requests.utils.quote(verify_url)}"
+        return {
+            "qr_url": fallback_url,
+            "verify_url": verify_url,
+            "booking_id": booking_id,
+            "pasajero": nombre,
+            "fecha": fecha
+        }
 
 
-def build_customer_qr_payload(booking_id: str, token: str, base_url: str = "https://emovils.com") -> dict:
+def generate_qr_message(booking_data: dict) -> str:
     """
-    Construye el payload del QR del cliente.
-    Solo contiene booking_id, token y URL de verificacion.
-    NO incluye datos personales sensibles.
+    Genera el mensaje de WhatsApp con el QR de recogida.
+    Se envía al pasajero al confirmar la reserva.
     """
-    verification_url = f"{base_url}/verify/{booking_id}?token={token}"
-    return {
-        "booking_id": booking_id,
-        "secure_token": token,
-        "verification_url": verification_url
-    }
+    nombre = booking_data.get("pasajero", "")
+    booking_id = booking_data.get("booking_id", "")
+    fecha = booking_data.get("fecha", "")
+    qr_url = booking_data.get("qr_url", "")
 
-
-def build_vehicle_qr_payload(vehicle_id: str, token: str, base_url: str = "https://emovils.com") -> dict:
-    """
-    Construye el payload del QR fisico del vehiculo.
-    Solo contiene vehicle_id, token y URL de verificacion.
-    """
-    verification_url = f"{base_url}/vehicle/verify/{vehicle_id}?token={token}"
-    return {
-        "vehicle_id": vehicle_id,
-        "secure_vehicle_token": token,
-        "verification_url": verification_url
-    }
-
-
-def get_qr_whatsapp_message(booking_id: str, qr_url: str) -> str:
-    """Mensaje para enviar al cliente con el QR via WhatsApp."""
     return (
-        f"Su reserva ha sido confirmada. Codigo: {booking_id}\n\n"
-        f"Le enviamos su codigo QR de servicio. "
-        f"Al momento de la recogida, el chofer escaneara este QR desde su aplicacion "
-        f"para confirmar que el servicio inicio correctamente.\n\n"
-        f"Acceda a su QR aqui:\n{qr_url}\n\n"
-        f"Al llegar el vehiculo, escanee tambien el QR pegado en la puerta. "
-        f"Solo aborde si aparece el check verde de Emovils."
+        f"✅ *Reserva Confirmada — Emovils*\n\n"
+        f"Estimado/a {nombre},\n\n"
+        f"Su traslado ha sido confirmado. Guarde este código QR:\n"
+        f"👉 {qr_url}\n\n"
+        f"📋 *Reserva:* {booking_id}\n"
+        f"📅 *Fecha:* {fecha}\n\n"
+        f"Al llegar su chofer, mostrará el QR para verificar que es el conductor asignado a su reserva.\n\n"
+        f"¿Alguna pregunta? Estamos disponibles 24/7."
     )
