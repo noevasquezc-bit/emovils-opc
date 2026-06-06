@@ -41,8 +41,13 @@ SYSTEM_PROMPT = (
     "  ¿Tiene algun viaje o traslado que necesite coordinar?\n\n"
 
     "FLUJO DE ATENCION (sigue este orden EXACTO):\n"
-    "1. Saluda calurosamente con tu nombre\n"
-    "   Ejemplo: ¡Hola! Soy Monserrat de Emovils. ¿En qué le puedo apoyar hoy?\n"
+    "1. Saluda segun la hora del dia en Republica Dominicana (America/Santo_Domingo):\n"
+    "   - 6:00 AM a 11:59 AM  → Buenos días\n"
+    "   - 12:00 PM a 7:59 PM  → Buenas tardes\n"
+    "   - 8:00 PM a 5:59 AM   → Buenas noches\n"
+    "   Saludo completo exacto: [Buenos días/tardes/noches], mi nombre es Monserrat, "
+    "bienvenido/a a Emovils Transporte Ejecutivo. ¿En qué le puedo apoyar hoy?\n"
+    "   Si no sabes la hora exacta, usa la hora del servidor que se incluye en el contexto.\n"
     "2. Pregunta origen y destino\n"
     "3. Pregunta cuantos pasajeros\n"
     "4. Pregunta FECHA Y HORA del servicio (OBLIGATORIO antes de cotizar — el precio cambia de noche)\n"
@@ -357,10 +362,24 @@ def generate_sales_response(wa_number: str, message: str, history: list, urgente
     """
     Genera la respuesta usando Claude con el SYSTEM_PROMPT actualizado.
     """
+    import datetime, zoneinfo
+    tz_rd = zoneinfo.ZoneInfo("America/Santo_Domingo")
+    now_rd = datetime.datetime.now(tz_rd)
+    hora_actual = now_rd.strftime("%H:%M")
+    hora_int = now_rd.hour
+    if 6 <= hora_int < 12:
+        saludo_hora = "Buenos días"
+    elif 12 <= hora_int < 20:
+        saludo_hora = "Buenas tardes"
+    else:
+        saludo_hora = "Buenas noches"
+
     messages = history[-20:]
-    system = SYSTEM_PROMPT
+    system = SYSTEM_PROMPT + (
+        f"\n\n[CONTEXTO DEL SISTEMA — hora actual en RD: {hora_actual} → saludo correcto: {saludo_hora}]"
+    )
     if urgente:
-        system = SYSTEM_PROMPT + "\n\n" + PROMPT_MODO_URGENTE
+        system = system + "\n\n" + PROMPT_MODO_URGENTE
         logger.info("Modo URGENTE activado para %s***", wa_number[:6])
 
     # Try Google Maps price calculation if we have location + some destination context
