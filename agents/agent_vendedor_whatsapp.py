@@ -17,6 +17,7 @@ from lib.pricing_engine import (
 )
 from workflows.wf_reserva_urgente import detectar_urgencia, PROMPT_MODO_URGENTE
 from workflows.wf_followup_sequence import schedule_followup_sequence
+from lib.database import crear_reserva as db_crear_reserva, RESERVAS as DB_RESERVAS
 from lib.google_maps import calculate_route_price
 
 logger = logging.getLogger(__name__)
@@ -114,6 +115,7 @@ SYSTEM_PROMPT = (
 
 CONVERSATION_HISTORY = {}
 LOCATION_CACHE = {}  # wa_number -> {'lat': float, 'lon': float}
+BOOKING_CREATED = {}  # wa_number -> booking_id (para no crear duplicados)
 
 
 def process_incoming_message(webhook_payload: dict) -> dict:
@@ -171,12 +173,117 @@ def process_incoming_message(webhook_payload: dict) -> dict:
     CONVERSATION_HISTORY[wa_number].append({"role": "assistant", "content": response_text})
     send_text(wa_number, response_text)
 
+    # Intentar crear reserva automaticamente si el agente acaba de confirmar
+    _intentar_crear_reserva(wa_number, response_text, CONVERSATION_HISTORY[wa_number])
+
     return {
         "status": "responded",
         "to": wa_number,
         "response_preview": response_text[:100]
     }
 
+
+
+
+# ─────────────────────────────────────────────
+# CREACION AUTOMATICA DE RESERVA
+# ─────────────────────────────────────────────
+
+EXTRACTION_PROMPT = """Analiza esta conversacion de WhatsApp de Emovils y extrae los datos si estan TODOS presentes.
+
+Responde UNICAMENTE con JSON valido. Si falta algun dato obligatorio responde: {"completo": false}
+
+Datos obligatorios: nombre, telefono, origen, destino, fecha, hora, pasajeros, precio, forma_pago, confirmado
+
+{
+  "completo": true/false,
+  "confirmado": true/false,  // el cliente dijo si/confirmo/de acuerdo/correcto/ok
+  "nombre": "...",
+  "telefono": "...",
+  "whatsapp": "...",  // numero de whatsapp del cliente
+  "origen": "...",
+  "destino": "...",
+  "fecha": "...",
+  "hora": "...",
+  "pasajeros": 1,
+  "vehiculo": "sedan|van",
+  "precio": 1500,  // numero sin simbolos
+  "forma_pago": "efectivo|tarjeta|en linea"
+}"""
+
+
+def _intentar_crear_reserva(wa_number: str, last_response: str, history: list) -> None:
+    """
+    Despues de cada respuesta del agente, verifica si el cliente confirmo la reserva.
+    Si si, extrae los datos y crea la reserva automaticamente.
+    Solo se ejecuta una vez por conversacion (evita duplicados).
+    """
+    import os
+    import json as json_mod
+
+    # No crear si ya existe reserva para este numero
+    if wa_number in BOOKING_CREATED:
+        return
+
+    # Solo intentar si la respuesta del agente contiene palabras de confirmacion
+    confirmacion_words = ["reserva ha sido confirmada", "reserva fue confirmada",
+                          "reserva confirmada", "su qr", "le enviaremos su qr",
+                          "solicitud esta registrada", "confirmacion de su reserva"]
+    if not any(w in last_response.lower() for w in confirmacion_words):
+        return
+
+    # Extraer datos estructurados de la conversacion con Claude
+    try:
+        base_url = os.getenv("BASE_URL", "https://emovils-opc-production.up.railway.app")
+        msgs = history[-20:]
+        conv_text = "\n".join(
+            f"{'Cliente' if m['role']=='user' else 'Emovils'}: {m['content']}"
+            for m in msgs
+            if isinstance(m.get("content"), str)
+        )
+
+        extraction = client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=400,
+            system=EXTRACTION_PROMPT,
+            messages=[{"role": "user", "content": conv_text + f"\n\nNumero WhatsApp del cliente: {wa_number}"}]
+        )
+        raw = extraction.content[0].text.strip()
+
+        # Limpiar markdown si Claude lo envuelve en ```json
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        datos = json_mod.loads(raw.strip())
+
+        if not datos.get("completo") or not datos.get("confirmado"):
+            return
+
+        # Asegurar whatsapp del cliente
+        datos["whatsapp"] = datos.get("whatsapp") or wa_number
+
+        # Crear reserva en la base de datos
+        reserva = db_crear_reserva(datos)
+        bid = reserva["booking_id"]
+        token = reserva["token_cliente"]
+        link = f"{base_url}/b/{bid}?t={token}"
+
+        BOOKING_CREATED[wa_number] = bid
+        logger.info("Reserva creada automaticamente: %s para %s", bid, wa_number[:6])
+
+        # Enviar link QR al cliente
+        msg_qr = (
+            f"Su reserva ha quedado registrada.\n"
+            f"Numero de reserva: {bid}\n\n"
+            f"Aqui puede ver su QR de embarque y los detalles:\n{link}\n\n"
+            f"Cuando llegue el vehiculo, escanee el QR en la puerta para verificar "
+            f"que es su conductor asignado."
+        )
+        send_text(wa_number, msg_qr)
+
+    except Exception as e:
+        logger.warning("Error creando reserva automatica: %s", e)
 
 
 def _try_calculate_price(wa_number: str, history: list) -> str:
