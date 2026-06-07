@@ -1,40 +1,30 @@
 """
 Emovils OPC — Voice Agent (Monserrat)
-Convierte respuestas de texto a audio via OpenAI TTS y las envía por WhatsApp.
-Modelo: tts-1 (más económico) | Voz: alloy (neutral) o nova (femenina)
+Convierte respuestas de texto a audio MP3 via gTTS (Google TTS, gratis).
+Envía el audio como mensaje de voz por WhatsApp (Green API).
 """
 import os
 import io
 import logging
 import requests
-import tempfile
-from openai import OpenAI
+from gtts import gTTS
 
 logger = logging.getLogger(__name__)
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 WHATSAPP_API_URL = os.getenv("WHATSAPP_API_URL", "https://7107.api.greenapi.com")
 WHATSAPP_INSTANCE_ID = os.getenv("WHATSAPP_INSTANCE_ID", "")
 WHATSAPP_API_KEY_ENV = os.getenv("WHATSAPP_API_KEY", "")
 
-# Voz de Monserrat — "nova" es femenina y cálida
-MONSERRAT_VOICE = "nova"
-TTS_MODEL = "tts-1"  # Más económico: $0.015/1K chars
-
 
 def text_to_audio(text: str) -> bytes:
     """
-    Convierte texto a audio MP3 via OpenAI TTS.
-    Retorna bytes del archivo MP3.
+    Convierte texto a audio MP3 via gTTS (Google TTS, gratis).
+    Idioma: español (es). Retorna bytes del archivo MP3.
     """
-    client = OpenAI(api_key=OPENAI_API_KEY)
-    response = client.audio.speech.create(
-        model=TTS_MODEL,
-        voice=MONSERRAT_VOICE,
-        input=text,
-        response_format="mp3"
-    )
-    return response.content
+    tts = gTTS(text=text, lang='es', slow=False)
+    mp3_buffer = io.BytesIO()
+    tts.write_to_fp(mp3_buffer)
+    return mp3_buffer.getvalue()
 
 
 def send_voice_message(to: str, text: str) -> dict:
