@@ -7,16 +7,18 @@ openai>=1.0.0
 
 # APIs externas
 requests>=2.31.0
-# PayPal — usado en RD en lugar de Stripe
-# (usamos requests directamente con PayPal REST API v2, sin SDK)
 
-# Configuración
+# Configuracion
 python-dotenv>=1.0.0
 
-# Servidor web (para webhooks)
+# Servidor web
 flask>=3.0.0
 flask-cors>=4.0.0
 gunicorn>=21.2.0
+
+# QR codes
+qrcode[pil]>=7.4.2
+Pillow>=10.0.0
 
 # Utilidades
 python-dateutil>=2.8.2
