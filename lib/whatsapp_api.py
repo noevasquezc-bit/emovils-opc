@@ -170,6 +170,8 @@ def parse_webhook_event(payload: dict) -> Optional[dict]:
         body = payload.get("body", payload)
         type_webhook = body.get("typeWebhook", "")
 
+        logger.info(f"Webhook recibido: typeWebhook={type_webhook}")
+
         if type_webhook != "incomingMessageReceived":
             return None
 
