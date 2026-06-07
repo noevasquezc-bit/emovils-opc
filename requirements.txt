@@ -5,13 +5,18 @@
 anthropic>=0.25.0
 openai>=1.0.0
 
+# TTS — voz de Monserrat (Google TTS, gratis)
+gTTS>=2.5.0
+
 # APIs externas
 requests>=2.31.0
+# PayPal — usado en RD en lugar de Stripe
+# (usamos requests directamente con PayPal REST API v2, sin SDK)
 
-# Configuracion
+# Configuración
 python-dotenv>=1.0.0
 
-# Servidor web
+# Servidor web (para webhooks)
 flask>=3.0.0
 flask-cors>=4.0.0
 gunicorn>=21.2.0
