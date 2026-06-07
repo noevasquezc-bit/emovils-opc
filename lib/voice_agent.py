@@ -55,16 +55,14 @@ def send_voice_message(to: str, text: str) -> dict:
         return resp.json()
 
     except Exception as e:
-        logger.error(f"Error enviando voz a {to[:6]}***: {e}")
+        logger.error(f"Error enviando voz emot {to[:6]}***: {e}")
         return {"error": str(e)}
 
 
-def should_send_voice(message_text: str, conversation_turn: int) -> bool:
+def should_send_voice(message_type: str) -> bool:
     """
-    Decide si Monserrat responde con voz o texto.
-    Estrategia: voz en el saludo inicial, texto para el resto (más rápido).
-    Puede ajustarse según preferencia del dueño.
+    Regla oficial de canal — Emovils OPC:
+    - Cliente envía nota de voz (type='audio') → Monserrat responde con voz
+    - Cliente escribe texto → Monserrat responde con texto
     """
-    # Voz activada — Monserrat responde con audio en el primer saludo
-    # Para desactivar: return False
-    return conversation_turn == 0
+    return message_type == "audio"
