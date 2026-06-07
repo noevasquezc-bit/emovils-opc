@@ -31,23 +31,29 @@ logger = logging.getLogger(__name__)
 # Cliente OpenAI — LLM principal
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-SYSTEM_PROMPT = """Eres Monserrat, Agente de Reservas de Emovils OPC, empresa de movilidad privada premium en República Dominicana.
+SYSTEM_PROMPT = """Eres Monserrat, agente de reservas de Emovils OPC. Eres una persona real — nunca digas que eres un bot, una IA, un asistente virtual ni nada parecido. Si alguien te pregunta si eres un bot, responde con naturalidad: "No, soy Monserrat, agente de reservas 😊".
+
+REGLAS DE IDENTIDAD — CRÍTICAS:
+- Eres humana. Punto.
+- JAMÁS uses frases como "como agente de IA", "soy un asistente", "soy un bot", "estoy programada para"
+- Si alguien insiste en que eres una IA, di que entiendes la desconfianza pero que estás aquí para ayudarle
+- Usa lenguaje natural, cálido, como lo haría una dominicana profesional
 
 OPERAMOS 24/7 — NUNCA digas que estás fuera de horario. Siempre disponible.
 
 TU FUNCIÓN:
 - Atender a todo cliente que escriba, a cualquier hora
 - Recopilar TODOS los datos necesarios para la reserva
-- Confirmar precio y crear la reserva en el sistema
-- Informar al cliente que un supervisor revisará y asignará conductor
+- Confirmar precio y crear la reserva
+- Informar que un supervisor revisará y asignará conductor
 - Manejar objeciones con confianza y cerrar
 
 FLUJO DE RESERVA (sigue este orden):
 1. Saluda calurosamente y pregunta qué necesitan
 2. Recopila los datos de la reserva (ver lista abajo)
 3. Confirma precio al cliente
-4. Crea la reserva → sistema notifica al supervisor
-5. Informa: "Su reserva fue registrada. Un supervisor la revisará y le asignará conductor en breve."
+4. Crea la reserva → supervisor recibe notificación
+5. Informa: "Su reserva quedó registrada. Un supervisor la revisará y le asignará conductor en breve."
 6. Envía QR de verificación de recogida
 
 PRODUCTO PRINCIPAL: Emovils Airport
@@ -74,8 +80,8 @@ MANEJO DE OBJECIONES:
 - "¿Es seguro?" → Chofer identificado, empresa formal, seguimiento por WhatsApp
 - "Lo pienso" → Los cupos se llenan; la reserva no requiere pago total ahora
 
-TONO: Profesional, cálido, seguro. Máximo 3 oraciones por mensaje. Sin emojis excesivos.
-Responde siempre en español. Sé conciso, directo y orientado al cierre."""
+TONO: Natural, cálido, profesional. Como una dominicana que sabe lo que hace. Máximo 3 oraciones por mensaje. Sin emojis excesivos.
+Responde siempre en español."""
 
 CONVERSATION_HISTORY = {}  # En producción, usar Redis o Airtable
 BOOKING_CONFIRMED = {}     # Trackea si ya se envió QR para un número
@@ -133,7 +139,7 @@ def process_incoming_message(webhook_payload: dict) -> dict:
         "content": response_text
     })
 
-    # Enviar respuesta: voz en primer saludo, texto el resto
+    # Enviar respuesta: voz o texto
     if should_send_voice(message_text, turn_number):
         send_voice_message(wa_number, response_text)
     else:
@@ -232,13 +238,13 @@ def qualify_lead(wa_number: str, conversation_summary: str) -> dict:
 
     Evalúa:
     1. Nivel de interés (1-10)
-    2. ¿Tiene fecha de viaje confirmada? (sí/no/no mencionó)
-    3. ¿Mencionó precio como objeción? (sí/no)
-    4. ¿Ya tiene alternativa de transporte? (sí/no/no mencionó)
+    2. ·Tiene fecha de viaje confirmada? (sí/no/no mencionó)
+    3. ·Mencionó precio como objeción? (sí/no)
+    4. ·Ya tiene alternativa de transporte? (sí/no/no mencionó)
     5. Siguiente acción recomendada:
        - COTIZAR: tiene toda la info necesaria
        - PREGUNTAR_MAS: necesita más datos
-       - SEGUIMIENTO: respondió pero no dio info
+       - SEGUIMOENTO: respondio pero no dio info
        - PERDIDO: claramente no interesado
 
     Responde en formato JSON.
@@ -325,11 +331,11 @@ La diferencia es que con Emovils usted tiene:
 ✓ No hay negociación al salir cansado del vuelo
 ✓ Seguimiento por WhatsApp
 
-¿Le parece si comparamos opciones y ve cuál le conviene más?""",
+·Le parece si comparamos opciones y ve cuál le conviene más?""",
 
         "tiene_conocido": """Perfecto, si ya tiene transporte coordinado, ¡excelente!
 
-Solo como plan B: si por alguna razón ese arreglo falla, estamos disponibles. Muchos clientes nos contactan en último momento y a veces no tenemos disponibilidad.
+Solo como plan B: si por alguna razón ese arreglo falla, estamos disponibles. Muchos clientes nos contactan en ú|timo momento y a veces no tenemos disponibilidad.
 
 ¿Le guarda el número por si acaso?""",
 
