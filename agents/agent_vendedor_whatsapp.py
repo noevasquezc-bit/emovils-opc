@@ -3,8 +3,8 @@ Emovils OPC — Agente 3: Vendedor WhatsApp (Monserrat)
 Responsabilidad: Califica leads, cotiza, maneja objeciones,
 da seguimiento y empuja al cierre. Canal principal de ventas.
 
-LLM: OpenAI GPT-4o-mini (más económico, muy rápido)
-Voz: OpenAI TTS "nova" (disponible bajo demanda)
+LLM: Anthropic Claude Haiku (rápido, económico)
+Voz: gTTS — Google TTS, gratis, en español
 QR: QR.io para verificación de recogida
 
 Flujo: WhatsApp → preguntas básicas → cotización → confirmación → pago → reserva → QR
@@ -12,8 +12,8 @@ Flujo: WhatsApp → preguntas básicas → cotización → confirmación → pag
 import os
 import logging
 import secrets
-from openai import OpenAI
-from config.settings import OPENAI_API_KEY, OPENAI_MODEL, ANTHROPIC_API_KEY
+import anthropic
+from config.settings import ANTHROPIC_API_KEY
 from lib.airtable_api import (
     create_lead, update_lead_status, get_lead_by_whatsapp,
     create_reserva, LeadStatus
@@ -28,25 +28,26 @@ from workflows.wf_followup_sequence import schedule_followup_sequence
 
 logger = logging.getLogger(__name__)
 
-# Cliente OpenAI — LLM principal
-client = OpenAI(api_key=OPENAI_API_KEY)
+# Cliente Anthropic — LLM principal
+client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+CLAUDE_MODEL = "claude-haiku-4-5-20251001"
 
-SYSTEM_PROMPT = """Eres Monserrat, agente inteligente de reservas de Emovils OPC. Eres un agente de IA con plena capacidad de razonamiento, no un bot con respuestas predefinidas. Si alguien pregunta si eres una IA, responde con honestidad y confianza: "Sí, soy Monserrat, agente inteligente de Emovils. Estoy aquí para ayudarte a reservar tu traslado 😊." — nunca digas que eres un bot, una IA, un asistente virtual ni nada parecido. Si alguien te pregunta si eres un bot, responde con naturalidad: "No, soy Monserrat, agente de reservas 😊".
+SYSTEM_PROMPT = """Eres Monserrat, agente inteligente de reservas de Emovils OPC. Eres un agente de IA con plena capacidad de razonamiento, no un bot con respuestas predefinidas. Si alguien pregunta si eres una IA, responde con honestidad y confianza: "Sí, soy Monserrat, agente inteligente de Emovils. Estoy aquí para ayudarte a reservar tu traslado 😊."
 
 IDENTIDAD:
 - Eres un agente inteligente — no un bot con scripts, no una persona humana
 - Puedes razonar, adaptar respuestas, manejar situaciones inesperadas y tomar decisiones
-- Si alguien pregunta algo fuera del guión, usa tu criterio para responder bien
+- Si alguien pregunta algo fuera del guion, usa tu criterio para responder bien
 - Tono: cálido, profesional, natural — como un agente dominicano que sabe lo que hace
 
-OPERAMOS 24/7 — NUNCA digas que estás fuera de horario. Siempre disponible.
+OPERAMOS 24/7 — siempre disponible, sin excusas de horario.
 
 TU FUNCIÓN:
 - Atender a todo cliente que escriba, a cualquier hora
 - Recopilar TODOS los datos necesarios para la reserva
 - Confirmar precio y crear la reserva
 - Informar que un supervisor revisará y asignará conductor
-- Manejar objeciones con confianza y cerrar
+- Manejar objeciones con inteligencia y cerrar la venta
 
 FLUJO DE RESERVA (sigue este orden):
 1. Saluda calurosamente y pregunta qué necesitan
@@ -139,7 +140,7 @@ def process_incoming_message(webhook_payload: dict) -> dict:
         "content": response_text
     })
 
-    # Enviar respuesta: voz o texto
+    # Enviar respuesta: voz en primer saludo, texto el resto
     if should_send_voice(message_text, turn_number):
         send_voice_message(wa_number, response_text)
     else:
@@ -159,7 +160,7 @@ def process_incoming_message(webhook_payload: dict) -> dict:
 
 def generate_sales_response(wa_number: str, message: str, history: list, urgente: bool = False) -> str:
     """
-    Genera la respuesta de Monserrat usando OpenAI GPT-4o-mini.
+    Genera la respuesta de Monserrat usando Claude Haiku.
     Si es urgente, usa el prompt de modo rápido para capturar datos mínimos.
     """
     messages = history[-10:]  # Últimos 10 mensajes para contexto
@@ -169,15 +170,23 @@ def generate_sales_response(wa_number: str, message: str, history: list, urgente
         system = SYSTEM_PROMPT + "\n\n" + PROMPT_MODO_URGENTE
         logger.info(f"Modo URGENTE activado para {wa_number[:6]}***")
 
-    response = client.chat.completions.create(
-        model=OPENAI_MODEL,
+    # Claude API requiere mensajes alternados user/assistant
+    clean_messages = []
+    for m in messages:
+        if m["role"] in ("user", "assistant"):
+            clean_messages.append({"role": m["role"], "content": m["content"]})
+
+    # Asegurar que empieza con user
+    if not clean_messages or clean_messages[0]["role"] != "user":
+        clean_messages = [{"role": "user", "content": message}]
+
+    response = client.messages.create(
+        model=CLAUDE_MODEL,
         max_tokens=500,
-        messages=[
-            {"role": "system", "content": system},
-            *messages
-        ]
+        system=system,
+        messages=clean_messages
     )
-    return response.choices[0].message.content
+    return response.content[0].text
 
 
 def _is_booking_confirmed(response_text: str) -> bool:
@@ -238,27 +247,25 @@ def qualify_lead(wa_number: str, conversation_summary: str) -> dict:
 
     Evalúa:
     1. Nivel de interés (1-10)
-    2. ·Tiene fecha de viaje confirmada? (sí/no/no mencionó)
-    3. ·Mencionó precio como objeción? (sí/no)
-    4. ·Ya tiene alternativa de transporte? (sí/no/no mencionó)
+    2. ¿Tiene fecha de viaje confirmada? (sí/no/no mencionó)
+    3. ¿Mencionó precio como objeción? (sí/no)
+    4. ¿Ya tiene alternativa de transporte? (sí/no/no mencionó)
     5. Siguiente acción recomendada:
        - COTIZAR: tiene toda la info necesaria
        - PREGUNTAR_MAS: necesita más datos
-       - SEGUIMOENTO: respondio pero no dio info
+       - SEGUIMIENTO: respondió pero no dio info
        - PERDIDO: claramente no interesado
 
     Responde en formato JSON.
     """
 
-    response = client.chat.completions.create(
-        model=OPENAI_MODEL,
+    response = client.messages.create(
+        model=CLAUDE_MODEL,
         max_tokens=400,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": prompt}
-        ]
+        system=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": prompt}]
     )
-    return {"qualification": response.choices[0].message.content}
+    return {"qualification": response.content[0].text}
 
 
 def send_quotation(
@@ -331,11 +338,11 @@ La diferencia es que con Emovils usted tiene:
 ✓ No hay negociación al salir cansado del vuelo
 ✓ Seguimiento por WhatsApp
 
-·Le parece si comparamos opciones y ve cuál le conviene más?""",
+¿Le parece si comparamos opciones y ve cuál le conviene más?""",
 
         "tiene_conocido": """Perfecto, si ya tiene transporte coordinado, ¡excelente!
 
-Solo como plan B: si por alguna razón ese arreglo falla, estamos disponibles. Muchos clientes nos contactan en ú|timo momento y a veces no tenemos disponibilidad.
+Solo como plan B: si por alguna razón ese arreglo falla, estamos disponibles. Muchos clientes nos contactan en último momento y a veces no tenemos disponibilidad.
 
 ¿Le guarda el número por si acaso?""",
 
