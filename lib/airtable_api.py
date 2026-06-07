@@ -151,7 +151,7 @@ def create_reserva(
             "Flight_Number": vuelo,
             "Passengers": pasajeros,
             "Quote_Price": precio_usd,
-            "Status": "pendiente_pago",
+            "Status": "Pending",
             "Created_At": datetime.now().isoformat()
         }
     }
@@ -165,7 +165,7 @@ def confirm_payment(record_id: str, payment_id: str) -> dict:
     """Confirma el pago de una reserva."""
     data = {
         "fields": {
-            "Status": "pagado",
+            "Status": "Completed",
             "Stripe_Session": payment_id,
             "Completed_At": datetime.now().isoformat()
         }
@@ -182,7 +182,7 @@ def assign_driver(record_id: str, nombre_chofer: str, vehiculo: str, tel_chofer:
             "Driver_Name": nombre_chofer,
             "Driver_Vehicle": vehiculo,
             "Driver_Phone": tel_chofer,
-            "Status": "confirmado"
+            "Status": "Confirmed"
         }
     }
     resp = requests.patch(f"{BASE_URL}/{AIRTABLE_RESERVAS_TABLE}/{record_id}", json=data, headers=HEADERS)
