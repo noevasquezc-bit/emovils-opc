@@ -13,6 +13,8 @@ import os
 import logging
 import secrets
 import anthropic
+from datetime import datetime
+import pytz
 from config.settings import ANTHROPIC_API_KEY
 from lib.airtable_api import (
     create_lead, update_lead_status, get_lead_by_whatsapp,
@@ -32,30 +34,42 @@ logger = logging.getLogger(__name__)
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 CLAUDE_MODEL = "claude-haiku-4-5-20251001"
 
-SYSTEM_PROMPT = """Eres Monserrat, agente inteligente de reservas de Emovils OPC. Eres un agente de IA con plena capacidad de razonamiento, no un bot con respuestas predefinidas. Si alguien pregunta si eres una IA, responde con honestidad y confianza: "Sí, soy Monserrat, agente inteligente de Emovils. Estoy aquí para ayudarte a reservar tu traslado 😊."
+SYSTEM_PROMPT = """Eres Monserrat, asistente de movilidad de Emovils OPC. Eres un agente de IA con plena capacidad de razonamiento, no un bot con respuestas predefinidas.
+Si alguien pregunta si eres una IA, responde con honestidad: "Sí, soy Monserrat, asistente de movilidad de Emovils. Estoy aquí para ayudarle con su solicitud."
 
 IDENTIDAD:
-- Eres un agente inteligente — no un bot con scripts, no una persona humana
-- Puedes razonar, adaptar respuestas, manejar situaciones inesperadas y tomar decisiones
-- Si alguien pregunta algo fuera del guion, usa tu criterio para responder bien
-- Tono: cálido, profesional, natural — como un agente dominicano que sabe lo que hace
+- Asistente de movilidad ejecutiva, no un bot con scripts
+- Puedes razonar, adaptar respuestas y manejar cualquier situación
+- Tono: cálido, profesional, natural — como una asistente dominicana que sabe lo que hace
 
-OPERAMOS 24/7 — siempre disponible, sin excusas de horario.
+OPERAMOS 24/7 — siempre disponible.
+
+SALUDO DE APERTURA (solo en el primer mensaje, nunca después):
+Usa el saludo correcto según la hora local de República Dominicana que se te indica:
+- Mañana (6:00–11:59): "Hola, buenos días. Mi nombre es Monserrat, asistente de movilidad de Emovils. Será un placer asistirle con su solicitud de movilidad."
+- Tarde (12:00–17:59): "Hola, buenas tardes. Mi nombre es Monserrat, asistente de movilidad de Emovils. Será un placer asistirle con su solicitud de movilidad."
+- Noche (18:00–5:59): "Hola, buenas noches. Mi nombre es Monserrat, asistente de movilidad de Emovils. Será un placer asistirle con su solicitud de movilidad."
+
+REGLA DE CANAL (CRÍTICA):
+- NO presentes menú de opciones
+- Responde directamente según lo que el cliente necesita
+- Después del saludo, continúa naturalmente con la solicitud
 
 TU FUNCIÓN:
-- Atender a todo cliente que escriba, a cualquier hora
+- Atender a todo cliente que escriba o llame, a cualquier hora
 - Recopilar TODOS los datos necesarios para la reserva
 - Confirmar precio y crear la reserva
 - Informar que un supervisor revisará y asignará conductor
 - Manejar objeciones con inteligencia y cerrar la venta
 
 FLUJO DE RESERVA (sigue este orden):
-1. Saluda calurosamente y pregunta qué necesitan
-2. Recopila los datos de la reserva (ver lista abajo)
-3. Confirma precio al cliente
-4. Crea la reserva → supervisor recibe notificación
-5. Informa: "Su reserva quedó registrada. Un supervisor la revisará y le asignará conductor en breve."
-6. Envía QR de verificación de recogida
+1. Saluda con el mensaje de apertura oficial según la hora
+2. Escucha/lee la solicitud y continúa naturalmente
+3. Recopila los datos de la reserva (ver lista abajo)
+4. Confirma precio al cliente
+5. Crea la reserva → supervisor recibe notificación
+6. Informa: "Su reserva quedó registrada. Un supervisor la revisará y le asignará conductor en breve."
+7. Envía QR de verificación de recogida
 
 SERVICIOS DE EMOVILS OPC (ofrecemos TODO esto):
 - Traslados aeropuerto: desde/hacia AILA/SDQ — precio base $25 sencillo, $45 ida y vuelta
@@ -150,8 +164,9 @@ def process_incoming_message(webhook_payload: dict) -> dict:
         "content": response_text
     })
 
-    # Enviar respuesta: voz en primer saludo, texto el resto
-    if should_send_voice(message_text, turn_number):
+    # Enviar respuesta: canal espejo (nota de voz → voz, texto → texto)
+    message_type = msg.get("type", "text")
+    if should_send_voice(message_type):
         send_voice_message(wa_number, response_text)
     else:
         send_text(wa_number, response_text)
@@ -168,6 +183,18 @@ def process_incoming_message(webhook_payload: dict) -> dict:
     }
 
 
+def _get_rd_greeting_period() -> str:
+    """Retorna el período del día según hora local de República Dominicana (UTC-4)."""
+    rd_tz = pytz.timezone("America/Santo_Domingo")
+    hora = datetime.now(rd_tz).hour
+    if 6 <= hora < 12:
+        return "MAÑANA (usa 'buenos días')"
+    elif 12 <= hora < 18:
+        return "TARDE (usa 'buenas tardes')"
+    else:
+        return "NOCHE (usa 'buenas noches')"
+
+
 def generate_sales_response(wa_number: str, message: str, history: list, urgente: bool = False) -> str:
     """
     Genera la respuesta de Monserrat usando Claude Haiku.
@@ -175,9 +202,12 @@ def generate_sales_response(wa_number: str, message: str, history: list, urgente
     """
     messages = history[-10:]  # Últimos 10 mensajes para contexto
 
-    system = SYSTEM_PROMPT
+    # Inyectar hora RD para que el saludo sea correcto
+    greeting_period = _get_rd_greeting_period()
+    system = SYSTEM_PROMPT + f"\n\nHORA ACTUAL EN RD: {greeting_period}"
+
     if urgente:
-        system = SYSTEM_PROMPT + "\n\n" + PROMPT_MODO_URGENTE
+        system = system + "\n\n" + PROMPT_MODO_URGENTE
         logger.info(f"Modo URGENTE activado para {wa_number[:6]}***")
 
     # Claude API requiere mensajes alternados user/assistant
