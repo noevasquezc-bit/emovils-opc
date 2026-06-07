@@ -1,6 +1,6 @@
 """
 Emovils OPC — Airtable API (CRM + Dashboard)
-Tablas: Leads, Reservas, Metricas, Contenido
+Campos mapeados a la estructura real de las tablas en Airtable.
 """
 import requests
 import logging
@@ -22,7 +22,7 @@ HEADERS = {
 
 
 # ─────────────────────────────────────────────
-# LEADS (Prospectos)
+# LEADS
 # ─────────────────────────────────────────────
 class LeadStatus:
     NUEVO = "nuevo"
@@ -42,13 +42,13 @@ def create_lead(
     """Crea un nuevo lead en Airtable."""
     data = {
         "fields": {
-            "WhatsApp": whatsapp,
-            "Nombre": nombre,
+            "Phone": whatsapp,
+            "Name": nombre or whatsapp,
             "Status": LeadStatus.NUEVO,
-            "Canal_Origen": canal_origen,
-            "Producto": producto,
-            "Fecha_Contacto": datetime.now().isoformat(),
-            "Notas": notas
+            "Source": canal_origen,
+            "Service_Interest": producto,
+            "Created_At": datetime.now().isoformat(),
+            "Notes": notas
         }
     }
     resp = requests.post(f"{BASE_URL}/{AIRTABLE_LEADS_TABLE}", json=data, headers=HEADERS)
@@ -62,19 +62,19 @@ def update_lead_status(record_id: str, status: str, notas: str = "") -> dict:
     data = {
         "fields": {
             "Status": status,
-            "Ultima_Actualizacion": datetime.now().isoformat(),
+            "Last_Contact": datetime.now().isoformat(),
         }
     }
     if notas:
-        data["fields"]["Notas"] = notas
+        data["fields"]["Notes"] = notas
     resp = requests.patch(f"{BASE_URL}/{AIRTABLE_LEADS_TABLE}/{record_id}", json=data, headers=HEADERS)
     resp.raise_for_status()
     return resp.json()
 
 
 def get_lead_by_whatsapp(whatsapp: str) -> Optional[dict]:
-    """Busca un lead por número de WhatsApp."""
-    params = {"filterByFormula": f"{{WhatsApp}} = '{whatsapp}'"}
+    """Busca un lead por número de WhatsApp (campo Phone)."""
+    params = {"filterByFormula": f"{{Phone}} = '{whatsapp}'"}
     resp = requests.get(f"{BASE_URL}/{AIRTABLE_LEADS_TABLE}", headers=HEADERS, params=params)
     resp.raise_for_status()
     records = resp.json().get("records", [])
@@ -90,7 +90,7 @@ def list_leads_by_status(status: str) -> list:
 
 
 # ─────────────────────────────────────────────
-# RESERVAS
+# RESERVAS (Bookings)
 # ─────────────────────────────────────────────
 def create_reserva(
     lead_id: str,
@@ -110,40 +110,43 @@ def create_reserva(
     producto: str = "airport"
 ) -> dict:
     """Crea una reserva confirmada."""
+    # Combinar fecha y hora en formato datetime
+    try:
+        travel_datetime = f"{fecha_viaje}T{hora_viaje}:00.000Z"
+    except Exception:
+        travel_datetime = fecha_viaje
+
+    # Generar Booking_ID único
+    booking_id = f"EMV-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
     data = {
         "fields": {
-            "Lead_ID": [lead_id],
-            "Nombre_Pasajero": nombre_pasajero,
-            "WhatsApp": whatsapp,
-            "Fecha_Viaje": fecha_viaje,
-            "Hora_Viaje": hora_viaje,
-            "Vuelo": vuelo,
-            "Aerolinea": aerolinea,
-            "Origen": origen,
-            "Destino": destino,
-            "Pasajeros": pasajeros,
-            "Maletas": maletas,
-            "Precio_USD": precio_usd,
-            "Forma_Pago": forma_pago,
-            "Tipo_Servicio": tipo_servicio,
-            "Producto": producto,
+            "Booking_ID": booking_id,
+            "Lead_ID": lead_id,
+            "Service": tipo_servicio,
+            "Pickup_Location": origen,
+            "Dropoff_Location": destino,
+            "Travel_Date": travel_datetime,
+            "Flight_Number": vuelo,
+            "Passengers": pasajeros,
+            "Quote_Price": precio_usd,
             "Status": "pendiente_pago",
-            "Fecha_Reserva": datetime.now().isoformat()
+            "Created_At": datetime.now().isoformat()
         }
     }
     resp = requests.post(f"{BASE_URL}/{AIRTABLE_RESERVAS_TABLE}", json=data, headers=HEADERS)
     resp.raise_for_status()
-    logger.info(f"Reserva creada: {nombre_pasajero} — {fecha_viaje}")
+    logger.info(f"Reserva creada: {booking_id} — {nombre_pasajero} — {fecha_viaje}")
     return resp.json()
 
 
-def confirm_payment(record_id: str, stripe_payment_id: str) -> dict:
+def confirm_payment(record_id: str, payment_id: str) -> dict:
     """Confirma el pago de una reserva."""
     data = {
         "fields": {
             "Status": "pagado",
-            "Stripe_Payment_ID": stripe_payment_id,
-            "Fecha_Pago": datetime.now().isoformat()
+            "Stripe_Session": payment_id,
+            "Completed_At": datetime.now().isoformat()
         }
     }
     resp = requests.patch(f"{BASE_URL}/{AIRTABLE_RESERVAS_TABLE}/{record_id}", json=data, headers=HEADERS)
@@ -155,11 +158,10 @@ def assign_driver(record_id: str, nombre_chofer: str, vehiculo: str, tel_chofer:
     """Asigna un chofer a una reserva."""
     data = {
         "fields": {
-            "Chofer_Nombre": nombre_chofer,
-            "Chofer_Vehiculo": vehiculo,
-            "Chofer_Telefono": tel_chofer,
-            "Status": "confirmado",
-            "Fecha_Asignacion": datetime.now().isoformat()
+            "Driver_Name": nombre_chofer,
+            "Driver_Vehicle": vehiculo,
+            "Driver_Phone": tel_chofer,
+            "Status": "confirmado"
         }
     }
     resp = requests.patch(f"{BASE_URL}/{AIRTABLE_RESERVAS_TABLE}/{record_id}", json=data, headers=HEADERS)
@@ -223,19 +225,14 @@ def get_pilot_totals() -> dict:
     }
 
 
-# ─────────────────────────────────────────────
-# ALERTA CPA PARA EL DUEÑO
-# ─────────────────────────────────────────────
 def create_cpa_alert(cpa: float, action: str, message: str) -> dict:
     """Crea una alerta de CPA visible para el dueño."""
     data = {
         "fields": {
             "Fecha": datetime.now().isoformat(),
-            "Tipo": "ALERTA_CPA",
-            "CPA_Actual": cpa,
-            "Mensaje": f"⚠️ PAUSA: CPA = ${cpa} (máximo $6) — {message}",
-            "Accion_Requerida": action,
-            "Status": "pendiente_revision"
+            "CPA_Status": "ALERTA",
+            "CPA": cpa,
+            "Canal_Origen": f"PAUSA: CPA=${cpa} (max $6) — {message}"
         }
     }
     resp = requests.post(f"{BASE_URL}/{AIRTABLE_METRICAS_TABLE}", json=data, headers=HEADERS)
