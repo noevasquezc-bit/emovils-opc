@@ -25,11 +25,29 @@ HEADERS = {
 # LEADS
 # ─────────────────────────────────────────────
 class LeadStatus:
-    NUEVO = "nuevo"
-    COTIZADO = "cotizado"
-    RESERVADO = "reservado"
-    PERDIDO = "perdido"
-    NO_RESPONDE = "no_responde"
+    NUEVO = "Todo"
+    COTIZADO = "In progress"
+    RESERVADO = "Done"
+    PERDIDO = "Todo"
+    NO_RESPONDE = "Todo"
+
+# Mapeo de canal origen a valores válidos de Airtable
+SOURCE_MAP = {
+    "whatsapp": "WhatsApp",
+    "facebook": "Facebook",
+    "instagram": "Instagram",
+    "referral": "Referral",
+    "organico": "Orgánico",
+}
+
+# Mapeo de producto a valores válidos de Airtable
+PRODUCT_MAP = {
+    "airport": "Airport",
+    "family": "Family",
+    "medical": "Medical",
+    "ejecutivo": "Ejecutivo",
+    "by_hour": "By Hour",
+}
 
 
 def create_lead(
@@ -40,18 +58,21 @@ def create_lead(
     notas: str = ""
 ) -> dict:
     """Crea un nuevo lead en Airtable."""
+    source = SOURCE_MAP.get(canal_origen.lower(), "WhatsApp")
+    service = PRODUCT_MAP.get(producto.lower(), "Airport")
     data = {
         "fields": {
             "Phone": whatsapp,
             "Name": nombre or whatsapp,
             "Status": LeadStatus.NUEVO,
-            "Source": canal_origen,
-            "Service_Interest": producto,
-            "Created_At": datetime.now().isoformat(),
+            "Source": source,
+            "Service_Interest": service,
             "Notes": notas
         }
     }
     resp = requests.post(f"{BASE_URL}/{AIRTABLE_LEADS_TABLE}", json=data, headers=HEADERS)
+    if not resp.ok:
+        logger.error(f"Airtable create_lead error {resp.status_code}: {resp.text}")
     resp.raise_for_status()
     logger.info(f"Lead creado: {whatsapp} — {nombre}")
     return resp.json()
