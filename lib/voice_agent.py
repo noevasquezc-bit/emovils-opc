@@ -75,6 +75,6 @@ def should_send_voice(message_text: str, conversation_turn: int) -> bool:
     Estrategia: voz en el saludo inicial, texto para el resto (más rápido).
     Puede ajustarse según preferencia del dueño.
     """
-    # Por ahora: solo texto (voz disponible bajo demanda)
-    # Para activar voz completa: return True
-    return False
+    # Voz activada — Monserrat responde con audio en el primer saludo
+    # Para desactivar: return False
+    return conversation_turn == 0
