@@ -143,6 +143,11 @@ def process_incoming_message(webhook_payload: dict) -> dict:
 
     turn_number = len(CONVERSATION_HISTORY[wa_number]) // 2
 
+    # Si es nota de voz, reemplazar el placeholder con prompt útil para Claude
+    message_type = msg.get("type", "text")
+    if message_type == "audio":
+        message_text = "Hola, necesito un traslado."
+
     CONVERSATION_HISTORY[wa_number].append({
         "role": "user",
         "content": message_text
@@ -151,7 +156,7 @@ def process_incoming_message(webhook_payload: dict) -> dict:
     # Detectar si es urgente (viaje hoy / ahora)
     es_urgente = detectar_urgencia(message_text)
 
-    # Generar respuesta con OpenAI
+    # Generar respuesta con Claude
     response_text = generate_sales_response(
         wa_number=wa_number,
         message=message_text,
@@ -165,7 +170,6 @@ def process_incoming_message(webhook_payload: dict) -> dict:
     })
 
     # Enviar respuesta: canal espejo (nota de voz → voz, texto → texto)
-    message_type = msg.get("type", "text")
     if should_send_voice(message_type):
         send_voice_message(wa_number, response_text)
     else:
@@ -231,10 +235,12 @@ def generate_sales_response(wa_number: str, message: str, history: list, urgente
 
 def _is_booking_confirmed(response_text: str) -> bool:
     """
-    Detecta si el mensaje de Monserrat indica que se creó una reserva.
+    Detecta si el mensaje de Monserrat confirma explícitamente que la reserva fue REGISTRADA.
+    Requiere frases de acción completada — no menciones generales de 'su reserva'.
     """
+    # Solo frases que indican acción completada (pasado)
     confirmed_phrases = [
-        "reserva quedo registrada",
+        "reserva quedó registrada",
         "reserva ha quedado registrada",
         "reserva fue registrada",
         "reserva ha sido registrada",
