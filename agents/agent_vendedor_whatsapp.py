@@ -18,7 +18,8 @@ import pytz
 from config.settings import ANTHROPIC_API_KEY
 from lib.airtable_api import (
     create_lead, update_lead_status, get_lead_by_whatsapp,
-    create_reserva, LeadStatus
+    create_reserva, LeadStatus,
+    get_conversation_history, save_conversation_history
 )
 from lib.whatsapp_api import send_text, send_quote, SCRIPTS, parse_webhook_event
 from lib.paypal_api import get_payment_link
@@ -108,8 +109,7 @@ MANEJO DE OBJECIONES:
 TONO: Natural, cálido, profesional. Máximo 3 oraciones por mensaje. Sin emojis excesivos.
 Responde siempre en español."""
 
-CONVERSATION_HISTORY = {}  # En producción, usar Redis o Airtable
-BOOKING_CONFIRMED = {}     # Trackea si ya se envió QR para un número
+BOOKING_CONFIRMED = {}     # Trackea si ya se envió QR para un número (en memoria, reinicio limpia)
 
 
 def process_incoming_message(webhook_payload: dict) -> dict:
@@ -137,18 +137,15 @@ def process_incoming_message(webhook_payload: dict) -> dict:
             producto="airport"
         )
 
-    # Obtener o crear historial de conversación
-    if wa_number not in CONVERSATION_HISTORY:
-        CONVERSATION_HISTORY[wa_number] = []
-
-    turn_number = len(CONVERSATION_HISTORY[wa_number]) // 2
+    # Cargar historial desde Airtable (persiste entre reinicios del servidor)
+    history = get_conversation_history(wa_number)
 
     # Si es nota de voz, reemplazar el placeholder con prompt útil para Claude
     message_type = msg.get("type", "text")
     if message_type == "audio":
         message_text = "Hola, necesito un traslado."
 
-    CONVERSATION_HISTORY[wa_number].append({
+    history.append({
         "role": "user",
         "content": message_text
     })
@@ -160,14 +157,17 @@ def process_incoming_message(webhook_payload: dict) -> dict:
     response_text = generate_sales_response(
         wa_number=wa_number,
         message=message_text,
-        history=CONVERSATION_HISTORY[wa_number],
+        history=history,
         urgente=es_urgente
     )
 
-    CONVERSATION_HISTORY[wa_number].append({
+    history.append({
         "role": "assistant",
         "content": response_text
     })
+
+    # Guardar historial en Airtable
+    save_conversation_history(wa_number, history)
 
     # Enviar respuesta: canal espejo (nota de voz → voz, texto → texto)
     if should_send_voice(message_type):
@@ -175,7 +175,7 @@ def process_incoming_message(webhook_payload: dict) -> dict:
     else:
         send_text(wa_number, response_text)
 
-    # Detectar reserva confirmada y enviar QR (solo una vez por número)
+    # Detectar reserva confirmada y enviar QR (solo una vez por número en esta sesión)
     if _is_booking_confirmed(response_text) and not BOOKING_CONFIRMED.get(wa_number):
         _send_booking_qr(wa_number, contact_name)
         BOOKING_CONFIRMED[wa_number] = True
