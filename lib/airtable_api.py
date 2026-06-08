@@ -4,6 +4,7 @@ Campos mapeados a la estructura real de las tablas en Airtable.
 """
 import requests
 import logging
+import json
 from datetime import datetime
 from typing import Optional
 from config.settings import (
@@ -244,6 +245,39 @@ def get_pilot_totals() -> dict:
         "cpa": round(total_spent / total_clients, 2) if total_clients > 0 else None,
         "days_recorded": len(records)
     }
+
+
+# ─────────────────────────────────────────────
+# HISTORIAL DE CONVERSACIÓN (persistencia entre reinicios)
+# ─────────────────────────────────────────────
+def get_conversation_history(wa_number: str) -> list:
+    """Carga el historial de conversación desde el campo Notes del lead."""
+    try:
+        lead = get_lead_by_whatsapp(wa_number)
+        if not lead:
+            return []
+        notes = lead.get("fields", {}).get("Notes", "")
+        if notes and notes.startswith("HISTORY:"):
+            return json.loads(notes[8:])
+    except Exception as e:
+        logger.error(f"Error cargando historial de {wa_number[:6]}***: {e}")
+    return []
+
+
+def save_conversation_history(wa_number: str, history: list) -> None:
+    """Guarda el historial de conversación en el campo Notes del lead."""
+    try:
+        lead = get_lead_by_whatsapp(wa_number)
+        if not lead:
+            return
+        record_id = lead["id"]
+        trimmed = history[-20:]  # Máximo 20 mensajes
+        data = {"fields": {"Notes": "HISTORY:" + json.dumps(trimmed, ensure_ascii=False)}}
+        resp = requests.patch(f"{BASE_URL}/{AIRTABLE_LEADS_TABLE}/{record_id}", json=data, headers=HEADERS)
+        if not resp.ok:
+            logger.error(f"Error guardando historial {resp.status_code}: {resp.text[:100]}")
+    except Exception as e:
+        logger.error(f"Error guardando historial de {wa_number[:6]}***: {e}")
 
 
 def create_cpa_alert(cpa: float, action: str, message: str) -> dict:
