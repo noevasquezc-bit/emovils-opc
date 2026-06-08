@@ -177,15 +177,34 @@ def parse_webhook_event(payload: dict) -> Optional[dict]:
 
         message_data = body.get("messageData", {})
         sender_data = body.get("senderData", {})
-        text_data = message_data.get("textMessageData", {})
 
         from_number = sender_data.get("sender", "").replace("@c.us", "")
         contact_name = sender_data.get("senderName", "")
-        text = text_data.get("textMessage", "")
         message_id = body.get("idMessage", "")
         timestamp = body.get("timestamp", 0)
+        type_message = message_data.get("typeMessage", "")
 
-        if not from_number or not text:
+        logger.info(f"typeMessage={type_message} de {from_number[:6] if from_number else 'unknown'}***")
+
+        if not from_number:
+            return None
+
+        # Nota de voz: Green API usa typeMessage "audioMessage" o "pttMessage"
+        if type_message in ("audioMessage", "pttMessage"):
+            return {
+                "from": from_number,
+                "type": "audio",
+                "text": "[nota de voz]",
+                "timestamp": timestamp,
+                "message_id": message_id,
+                "contact_name": contact_name
+            }
+
+        # Texto normal
+        text_data = message_data.get("textMessageData", {})
+        text = text_data.get("textMessage", "")
+
+        if not text:
             return None
 
         return {
