@@ -195,6 +195,30 @@ def enviar_a_cliente(whatsapp: str, mensaje: str) -> dict:
     return get_client().enviar_texto(whatsapp, mensaje)
 
 
+def enviar_audio_a_cliente(whatsapp: str, texto: str) -> bool:
+    """Genera audio con gTTS (voz dominicana) y lo envía como nota de voz."""
+    try:
+        import tempfile
+        from gtts import gTTS
+        # Limpiar emojis y markdown para que la voz suene natural
+        import re as _re
+        limpio = _re.sub(r"[*_`#>]", "", texto)
+        limpio = _re.sub(r"[^\w\s\.\,\!\?¿¡:;\-\$\náéíóúÁÉÍÓÚñÑüÜ]", " ", limpio)
+        limpio = _re.sub(r"\s+", " ", limpio).strip()
+        if not limpio:
+            return False
+        # gTTS soporta español; "com.mx" da acento neutro-latino, lo más cercano a RD
+        tts = gTTS(text=limpio, lang="es", tld="com.mx", slow=False)
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+            tts.save(f.name)
+            audio_path = f.name
+        get_client().enviar_archivo(whatsapp, audio_path, caption="")
+        return True
+    except Exception as exc:
+        logger.warning(f"No se pudo enviar audio: {exc}")
+        return False
+
+
 def enviar_qr_a_cliente(whatsapp: str, path_qr_png: str | Path, contexto_servicio: str) -> dict:
     """Atajo para enviar el QR del servicio al cliente."""
     return get_client().enviar_archivo(

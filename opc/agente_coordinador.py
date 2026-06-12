@@ -443,6 +443,7 @@ class ResultadoConversacion:
     accion_disparada: Optional[str] = None
     necesita_cliente_continuar: bool = True
     datos_cotizacion: Optional[DatosCotizacion] = None
+    enviar_como_voz: bool = False  # True si el cliente uso audio → responder con audio
 
 
 def procesar_mensaje_entrante(
@@ -648,8 +649,68 @@ def crear_reserva_y_asignar(
 # Memoria conversacional en RAM (en produccion: Airtable Conversations)
 # ═════════════════════════════════════════════════════════════
 
-_MEMORIA_CONVERSACIONES: dict[str, list[dict]] = {}
-_MAX_TURNOS_MEMORIA = 12  # ultimos 12 turnos por cliente
+def _franja_horaria(hora: int) -> str:
+    if 5 <= hora < 12: return "mañana — saluda 'Buenos días'"
+    if 12 <= hora < 19: return "tarde — saluda 'Buenas tardes'"
+    return "noche — saluda 'Buenas noches'"
+
+
+_MEMORIA_CONVERSACIONES: dict[str, list[dict]] = {}  # cache local (1 worker)
+_MAX_TURNOS_MEMORIA = 16  # ultimos 16 turnos por cliente
+_TABLA_CONVERSACIONES = os.getenv("AIRTABLE_CONVERSATIONS_TABLE", "Conversations")
+
+
+def _cargar_memoria_persistente(whatsapp_cliente: str) -> list[dict]:
+    """Carga el historial del cliente desde Airtable (persiste entre workers/restarts)."""
+    if whatsapp_cliente in _MEMORIA_CONVERSACIONES:
+        return _MEMORIA_CONVERSACIONES[whatsapp_cliente]
+    try:
+        api = AirtableOPC()
+        existente = api.buscar_por_campo(_TABLA_CONVERSACIONES, "WhatsApp", whatsapp_cliente)
+        if existente:
+            raw = existente.get("fields", {}).get("Historial", "[]")
+            historial = json.loads(raw) if isinstance(raw, str) else []
+            _MEMORIA_CONVERSACIONES[whatsapp_cliente] = historial[-_MAX_TURNOS_MEMORIA:]
+            return _MEMORIA_CONVERSACIONES[whatsapp_cliente]
+    except Exception as exc:
+        logger.warning("No se pudo cargar memoria de Airtable: %s", exc)
+    _MEMORIA_CONVERSACIONES[whatsapp_cliente] = []
+    return []
+
+
+def _guardar_memoria_persistente(whatsapp_cliente: str, nombre: str = "") -> None:
+    """Guarda el historial del cliente en Airtable (sobrevive restarts y workers)."""
+    historial = _MEMORIA_CONVERSACIONES.get(whatsapp_cliente, [])
+    if not historial:
+        return
+    # Serializar content (anthropic ContentBlocks → dicts)
+    serializable = []
+    for turno in historial[-_MAX_TURNOS_MEMORIA:]:
+        c = turno.get("content")
+        if isinstance(c, str):
+            serializable.append({"role": turno["role"], "content": c})
+        elif isinstance(c, list):
+            blocks = []
+            for b in c:
+                if hasattr(b, "type"):
+                    if b.type == "text":
+                        blocks.append({"type": "text", "text": b.text})
+                    elif b.type == "tool_use":
+                        blocks.append({"type": "tool_use", "id": b.id, "name": b.name, "input": dict(b.input)})
+                elif isinstance(b, dict):
+                    blocks.append(b)
+            serializable.append({"role": turno["role"], "content": blocks})
+    try:
+        api = AirtableOPC()
+        payload = {
+            "WhatsApp": whatsapp_cliente,
+            "Nombre": nombre or "",
+            "Historial": json.dumps(serializable, ensure_ascii=False, default=str)[:95000],
+            "Ultima_actividad": datetime.now().isoformat(),
+        }
+        api.upsert(_TABLA_CONVERSACIONES, "WhatsApp", whatsapp_cliente, payload)
+    except Exception as exc:
+        logger.warning("No se pudo persistir memoria en Airtable: %s", exc)
 
 HERRAMIENTAS_MONSERRAT = [
     {
@@ -821,19 +882,35 @@ def _procesar_con_claude(
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     modelo = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 
-    # Memoria conversacional
-    memoria = _MEMORIA_CONVERSACIONES.setdefault(whatsapp_cliente, [])
+    # Memoria PERSISTENTE — carga de Airtable, sobrevive workers/restarts
+    memoria = _cargar_memoria_persistente(whatsapp_cliente)
     memoria.append({"role": "user", "content": mensaje})
-    # Trim a ultimos N turnos
     if len(memoria) > _MAX_TURNOS_MEMORIA:
         memoria[:] = memoria[-_MAX_TURNOS_MEMORIA:]
+    _MEMORIA_CONVERSACIONES[whatsapp_cliente] = memoria
 
     # Inyectar nombre cliente y fecha hoy en system
+    ahora = datetime.now()
+    dia_semana = ["lunes","martes","miércoles","jueves","viernes","sábado","domingo"][ahora.weekday()]
     system_completo = SYSTEM_PROMPT_MONSERRAT + (
-        f"\n\nDatos del cliente actual:\n"
+        f"\n\n═══════════════════════════════════════════\n"
+        f"DATOS DEL CLIENTE Y CONTEXTO ACTUAL:\n"
+        f"═══════════════════════════════════════════\n"
         f"- WhatsApp: {whatsapp_cliente}\n"
-        f"- Nombre: {nombre_cliente or 'No registrado aun — preguntale'}\n"
-        f"- Fecha hoy: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
+        f"- Nombre: {nombre_cliente or 'No registrado aún — preguntáselo si va a reservar'}\n"
+        f"- Fecha hoy: {dia_semana} {ahora.strftime('%d de %B de %Y')}\n"
+        f"- Hora actual: {ahora.strftime('%H:%M')} ({_franja_horaria(ahora.hour)})\n"
+        f"- Turnos previos en este chat: {len(memoria) - 1}\n"
+        f"\n"
+        f"⚠️ DATOS CRÍTICOS QUE DEBES TENER ANTES DE COTIZAR:\n"
+        f"  1. ORIGEN (de dónde sale)\n"
+        f"  2. DESTINO (a dónde va)\n"
+        f"  3. PASAJEROS (cuántos viajan)\n"
+        f"  4. FECHA (qué día) — si dice 'mañana', calcula tú la fecha real\n"
+        f"  5. HORA (a qué hora) — si dice 'ahora', es servicio inmediato\n"
+        f"\n"
+        f"Solo cotiza cuando tengas LOS 5 datos. Si falta alguno, pídelo amablemente.\n"
+        f"Si no falta nada → llama cotizar_servicio. Si confirma → crear_reserva.\n"
     )
 
     accion_disparada = None
@@ -853,6 +930,8 @@ def _procesar_con_claude(
                 if block.type == "text":
                     texto_respuesta += block.text
             memoria.append({"role": "assistant", "content": response.content})
+            # PERSISTIR memoria en Airtable (sobrevive workers/restarts)
+            _guardar_memoria_persistente(whatsapp_cliente, nombre_cliente)
             return ResultadoConversacion(
                 respuesta=texto_respuesta.strip() or "Disculpa, dime otra vez por favor.",
                 intencion=intencion_detectada,
@@ -894,6 +973,7 @@ def _procesar_con_claude(
         break
 
     # Si llego aqui: agotamos iteraciones
+    _guardar_memoria_persistente(whatsapp_cliente, nombre_cliente)
     return ResultadoConversacion(
         respuesta="Dame un momentito, dejame revisar y te respondo.",
         intencion=intencion_detectada,

@@ -65,6 +65,44 @@ CORS(app)
 
 
 # ═══════════════════════════════════════════════════════════════
+# HELPERS: transcripción voz + envío audio
+# ═══════════════════════════════════════════════════════════════
+
+def _transcribir_audio_whisper(audio_url: str) -> str:
+    """Descarga el audio de Green API y lo transcribe con OpenAI Whisper.
+    Si Whisper no está disponible, devuelve placeholder seguro."""
+    if not audio_url:
+        return "Te escuche, dime de nuevo por favor"
+    try:
+        import requests
+        from openai import OpenAI
+        api_key = os.getenv("OPENAI_API_KEY", "")
+        if not api_key:
+            return "Hola, recibí tu nota de voz. Dime en texto qué necesitas por favor"
+
+        # Descargar audio temporal
+        import tempfile
+        r = requests.get(audio_url, timeout=20)
+        if r.status_code != 200:
+            return "No pude oir tu nota, escribeme por favor"
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as f:
+            f.write(r.content)
+            audio_path = f.name
+
+        client = OpenAI(api_key=api_key)
+        with open(audio_path, "rb") as af:
+            transcript = client.audio.transcriptions.create(
+                model="whisper-1", file=af, language="es"
+            )
+        texto = (transcript.text or "").strip()
+        logger.info(f"🎙️  Whisper transcribió: {texto[:120]}")
+        return texto or "Te escuche pero no entendí, repite por favor"
+    except Exception as exc:
+        logger.warning(f"Whisper fallo: {exc}")
+        return "Hola, necesito un traslado"
+
+
+# ═══════════════════════════════════════════════════════════════
 # HEALTH CHECKS
 # ═══════════════════════════════════════════════════════════════
 
@@ -205,16 +243,27 @@ def whatsapp_webhook():
             nombre = sender_data.get("senderName", "") or sender_data.get("chatName", "")
 
             type_msg = msg_data.get("typeMessage", "")
+            cliente_uso_audio = False
             if type_msg in ("textMessage", "extendedTextMessage"):
                 texto = (msg_data.get("textMessageData", {}).get("textMessage", "") or
                          msg_data.get("extendedTextMessageData", {}).get("text", ""))
             elif type_msg in ("audioMessage", "pttMessage"):
-                # Nota de voz — placeholder hasta integrar STT
-                texto = "Hola necesito un traslado"  # fallback temporal
+                # Cliente envia nota de voz → transcribir con Whisper
+                cliente_uso_audio = True
+                audio_url = (msg_data.get("fileMessageData", {}).get("downloadUrl", "") or
+                             msg_data.get("audioMessageData", {}).get("downloadUrl", ""))
+                texto = _transcribir_audio_whisper(audio_url) if audio_url else "Te escuche, dame un segundo"
+            elif type_msg == "locationMessage":
+                # Cliente envia ubicacion (mapa) — extraer lat/lng
+                loc = msg_data.get("locationMessageData", {})
+                lat = loc.get("latitude", "")
+                lng = loc.get("longitude", "")
+                nombre_lugar = loc.get("nameLocation", "") or loc.get("address", "")
+                texto = f"Mi ubicacion es: {nombre_lugar} (coordenadas {lat}, {lng})" if lat else "Te mando mi ubicacion"
             elif type_msg == "imageMessage":
                 texto = msg_data.get("imageMessageData", {}).get("caption", "") or "Te mando una imagen"
             else:
-                # Otros tipos (location, contact, etc.) no procesar
+                # Otros tipos no procesables
                 return jsonify({"status": "ignored", "type_msg": type_msg})
 
         # FORMATO B: Meta WhatsApp Business API (entry > changes > value)
@@ -252,9 +301,17 @@ def whatsapp_webhook():
         )
 
         # ENVIO REAL al WhatsApp del cliente via Green API
+        # Si el cliente usó audio → respondemos con audio (gTTS)
+        usar_voz = locals().get("cliente_uso_audio", False)
         try:
-            from opc.whatsapp_green_api import enviar_a_cliente
-            enviar_a_cliente(whatsapp, resultado.respuesta)
+            from opc.whatsapp_green_api import enviar_a_cliente, enviar_audio_a_cliente
+            if usar_voz:
+                ok = enviar_audio_a_cliente(whatsapp, resultado.respuesta)
+                if not ok:
+                    # fallback a texto
+                    enviar_a_cliente(whatsapp, resultado.respuesta)
+            else:
+                enviar_a_cliente(whatsapp, resultado.respuesta)
         except Exception as send_err:
             logger.warning(f"No se pudo enviar via Green API: {send_err}")
 
@@ -262,6 +319,7 @@ def whatsapp_webhook():
             "respuesta": resultado.respuesta,
             "intencion": resultado.intencion,
             "accion_disparada": resultado.accion_disparada,
+            "envio_voz": usar_voz,
         })
     except Exception as e:
         logger.error(f"Error WhatsApp webhook: {e}")
