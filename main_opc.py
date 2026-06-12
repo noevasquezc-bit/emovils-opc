@@ -303,23 +303,48 @@ def whatsapp_webhook():
         # ENVIO REAL al WhatsApp del cliente via Green API
         # Si el cliente usó audio → respondemos con audio (gTTS)
         usar_voz = locals().get("cliente_uso_audio", False)
+        envio_status = "no_intentado"
+        envio_detalle = ""
         try:
-            from opc.whatsapp_green_api import enviar_a_cliente, enviar_audio_a_cliente
+            from opc.whatsapp_green_api import enviar_a_cliente, enviar_audio_a_cliente, get_client
+            # Verificar estado de la instancia ANTES
+            try:
+                estado = get_client().estado_instancia()
+                state_value = estado.get("stateInstance", "desconocido")
+                logger.info(f"🔌 Estado Green API instancia: {state_value}")
+                if state_value != "authorized":
+                    envio_status = "instancia_no_autorizada"
+                    envio_detalle = f"Instancia Green API estado={state_value}. Reconectar QR en console.green-api.com"
+                    logger.error(f"❌ {envio_detalle}")
+            except Exception as st_err:
+                logger.warning(f"No pude consultar estado instancia: {st_err}")
+
+            logger.info(f"📤 Enviando a {whatsapp} (voz={usar_voz}): {resultado.respuesta[:80]}")
             if usar_voz:
                 ok = enviar_audio_a_cliente(whatsapp, resultado.respuesta)
-                if not ok:
-                    # fallback a texto
-                    enviar_a_cliente(whatsapp, resultado.respuesta)
+                if ok:
+                    envio_status = "audio_enviado"
+                else:
+                    fallback_resp = enviar_a_cliente(whatsapp, resultado.respuesta)
+                    envio_status = "audio_fallo_fallback_texto"
+                    envio_detalle = str(fallback_resp)[:200]
             else:
-                enviar_a_cliente(whatsapp, resultado.respuesta)
+                resp = enviar_a_cliente(whatsapp, resultado.respuesta)
+                envio_status = "texto_enviado"
+                envio_detalle = str(resp)[:200]
+            logger.info(f"✅ Envío OK: {envio_status} · {envio_detalle[:120]}")
         except Exception as send_err:
-            logger.warning(f"No se pudo enviar via Green API: {send_err}")
+            envio_status = "excepcion"
+            envio_detalle = str(send_err)[:300]
+            logger.error(f"❌ ENVIO FALLO: {envio_detalle}")
 
         return jsonify({
             "respuesta": resultado.respuesta,
             "intencion": resultado.intencion,
             "accion_disparada": resultado.accion_disparada,
             "envio_voz": usar_voz,
+            "envio_status": envio_status,
+            "envio_detalle": envio_detalle[:200],
         })
     except Exception as e:
         logger.error(f"Error WhatsApp webhook: {e}")
