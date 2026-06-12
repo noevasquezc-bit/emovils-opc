@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Emovils OPC · Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --primary: #0A2540;
+    --secondary: #1E5F8E;
+    --accent: #F2A900;
+    --success: #0E7C3A;
+    --warning: #C7400D;
+    --danger: #DC2626;
+    --bg: #F4F6F8;
+    --card: #FFFFFF;
+    --text: #1A1A1A;
+    --light: #6B7280;
+    --border: #E1E1E1;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0;
+       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  body { background: var(--bg); color: var(--text); padding: 24px; }
+  .container { max-width: 1400px; margin: 0 auto; }
+
+  header { display: flex; justify-content: space-between; align-items: center;
+           background: var(--primary); color: white; padding: 20px 28px;
+           border-radius: 12px; margin-bottom: 24px; }
+  header h1 { font-size: 22px; font-weight: 700; }
+  header .info { font-size: 14px; opacity: 0.85; }
+  header .actions button { background: var(--accent); color: var(--primary);
+                            border: none; padding: 8px 16px; border-radius: 6px;
+                            font-weight: 600; cursor: pointer; margin-left: 8px; }
+
+  .kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr);
+              gap: 16px; margin-bottom: 24px; }
+  .kpi { background: var(--card); padding: 20px; border-radius: 12px;
+         box-shadow: 0 2px 4px rgba(0,0,0,0.04); }
+  .kpi .label { font-size: 12px; color: var(--light); text-transform: uppercase;
+                font-weight: 600; letter-spacing: 0.5px; }
+  .kpi .value { font-size: 28px; font-weight: 700; color: var(--primary);
+                margin: 8px 0 4px; }
+  .kpi .delta { font-size: 12px; color: var(--success); }
+  .kpi .delta.negative { color: var(--danger); }
+  .kpi.warning .value { color: var(--warning); }
+
+  .grid-2 { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; margin-bottom: 24px; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 24px; }
+
+  .card { background: var(--card); padding: 20px; border-radius: 12px;
+          box-shadow: 0 2px 4px rgba(0,0,0,0.04); }
+  .card h2 { font-size: 14px; color: var(--primary); margin-bottom: 12px;
+             text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px; }
+  .card-chart { height: 280px; position: relative; }
+
+  .alert-list { list-style: none; }
+  .alert-list li { padding: 10px 0; border-bottom: 1px solid var(--border);
+                   font-size: 13px; display: flex; gap: 8px; align-items: center; }
+  .alert-list li:last-child { border-bottom: none; }
+  .alert-list .icon { font-size: 16px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { background: var(--bg); padding: 10px 8px; text-align: left;
+       font-weight: 600; color: var(--primary); border-bottom: 2px solid var(--border); }
+  td { padding: 10px 8px; border-bottom: 1px solid var(--border); }
+  tr:last-child td { border-bottom: none; }
+  .badge { display: inline-block; padding: 3px 8px; border-radius: 4px;
+           font-size: 11px; font-weight: 600; text-transform: uppercase; }
+  .badge.success { background: #DCFCE7; color: var(--success); }
+  .badge.warning { background: #FEF3C7; color: var(--warning); }
+  .badge.info { background: #DBEAFE; color: var(--secondary); }
+  .badge.pending { background: #F3F4F6; color: var(--light); }
+
+  .empty { text-align: center; padding: 40px 20px; color: var(--light); font-size: 13px; }
+  .empty .big { font-size: 32px; margin-bottom: 8px; }
+
+  .status-pill { display: inline-flex; align-items: center; gap: 6px;
+                  padding: 4px 10px; background: #DCFCE7; color: var(--success);
+                  border-radius: 12px; font-size: 12px; font-weight: 600; }
+  .status-pill::before { content: ""; width: 8px; height: 8px; background: var(--success);
+                          border-radius: 50%; animation: pulse 2s infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  @media (max-width: 900px) {
+    .kpi-grid { grid-template-columns: repeat(2, 1fr); }
+    .grid-2, .grid-3 { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <div>
+    <h1>📊 Emovils OPC · Dashboard</h1>
+    <div class="info" id="header-info">Cargando datos en vivo...</div>
+  </div>
+  <div class="actions">
+    <span class="status-pill">Sistema operando</span>
+    <button onclick="cargarTodo()">↻ Refrescar</button>
+  </div>
+</header>
+
+<!-- KPIs principales -->
+<div class="kpi-grid">
+  <div class="kpi">
+    <div class="label">Servicios ayer</div>
+    <div class="value" id="kpi-servicios-ayer">—</div>
+    <div class="delta" id="kpi-servicios-delta">cargando...</div>
+  </div>
+  <div class="kpi">
+    <div class="label">Facturación ayer</div>
+    <div class="value" id="kpi-facturacion-ayer">—</div>
+    <div class="delta" id="kpi-facturacion-delta">cargando...</div>
+  </div>
+  <div class="kpi">
+    <div class="label">Ganancia operativa</div>
+    <div class="value" id="kpi-ganancia-ayer">—</div>
+    <div class="delta" id="kpi-ganancia-delta">cargando...</div>
+  </div>
+  <div class="kpi" id="kpi-card-conductores">
+    <div class="label">Conductores activos</div>
+    <div class="value" id="kpi-conductores">—</div>
+    <div class="delta" id="kpi-conductores-delta">de 28 totales</div>
+  </div>
+</div>
+
+<!-- Gráficos principales -->
+<div class="grid-2">
+  <div class="card">
+    <h2>📈 Servicios por hora (último día)</h2>
+    <div class="card-chart"><canvas id="chart-horas"></canvas></div>
+  </div>
+  <div class="card">
+    <h2>🥧 Distribución por canal</h2>
+    <div class="card-chart"><canvas id="chart-canales"></canvas></div>
+  </div>
+</div>
+
+<div class="grid-2">
+  <div class="card">
+    <h2>💰 Facturación últimos 30 días</h2>
+    <div class="card-chart"><canvas id="chart-facturacion"></canvas></div>
+  </div>
+  <div class="card">
+    <h2>⚠️ Alertas activas</h2>
+    <ul class="alert-list" id="alerts-list">
+      <li class="empty"><div>✅</div>Sin alertas críticas</li>
+    </ul>
+  </div>
+</div>
+
+<!-- Tablas operativas -->
+<div class="grid-2">
+  <div class="card">
+    <h2>🚖 Últimos servicios</h2>
+    <div id="tabla-servicios">Cargando...</div>
+  </div>
+  <div class="card">
+    <h2>🏢 Clientes B2B</h2>
+    <div id="tabla-clientes">Cargando...</div>
+  </div>
+</div>
+
+<!-- Pipeline B2B + Marketing -->
+<div class="grid-2" style="margin-top:24px;">
+  <div class="card">
+    <h2>📈 Pipeline B2B (HubSpot CRM)</h2>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
+      <div style="background:#F4F6F8;padding:14px;border-radius:8px;text-align:center;">
+        <div style="font-size:11px;color:#6B7280;text-transform:uppercase;">Companies</div>
+        <div style="font-size:28px;font-weight:700;color:#0A2540;">54</div>
+        <div style="font-size:11px;color:#0E7C3A;">en pipeline</div>
+      </div>
+      <div style="background:#F4F6F8;padding:14px;border-radius:8px;text-align:center;">
+        <div style="font-size:11px;color:#6B7280;text-transform:uppercase;">Deals Activos</div>
+        <div style="font-size:28px;font-weight:700;color:#0A2540;">10</div>
+        <div style="font-size:11px;color:#0E7C3A;">$405K USD potencial</div>
+      </div>
+    </div>
+    <div style="font-size:13px;color:#1A1A1A;">
+      <div style="padding:8px 0;border-bottom:1px solid #E1E1E1;">🏢 <strong>10 Call Centers</strong> · Teleperformance, Alorica, Sutherland, Sitel, Atento, iQor, Conduent, Capital BPO, TLM, Outsourcing Solutions</div>
+      <div style="padding:8px 0;border-bottom:1px solid #E1E1E1;">🏨 <strong>17 Hoteles</strong> · Casa de Campo, Eden Roc, Hard Rock, Excellence, TRS, Paradisus, Royalton, Hyatt, Sanctuary, +8</div>
+      <div style="padding:8px 0;border-bottom:1px solid #E1E1E1;">🚢 <strong>7 Navieras</strong> · Carnival, Royal Caribbean, Norwegian, MSC, Costa, Princess, Disney</div>
+      <div style="padding:8px 0;border-bottom:1px solid #E1E1E1;">🛂 <strong>8 Embajadas</strong> · USA, España, Francia, Alemania, UK, Canadá, Brasil, Italia</div>
+      <div style="padding:8px 0;">✈️ <strong>7 Agencias</strong> · Caribbean Tours, Amstar, Apple Vacations, Bahia Principe, Tropical, VIP, Maxim</div>
+    </div>
+    <a href="https://app.hubspot.com/contacts/51505905/companies/list/view/all" target="_blank" style="display:inline-block;margin-top:12px;color:#1E5F8E;font-size:12px;">Ver en HubSpot →</a>
+  </div>
+  <div class="card">
+    <h2>📧 Email Outreach (MailerLite)</h2>
+    <div style="font-size:13px;color:#1A1A1A;">
+      <div style="padding:8px 0;border-bottom:1px solid #E1E1E1;">
+        <strong>6 grupos creados</strong> · 6 plantillas listas
+      </div>
+      <div style="padding:8px 0;border-bottom:1px solid #E1E1E1;">📞 Call Centers · "Reducir 30% el costo de transporte..."</div>
+      <div style="padding:8px 0;border-bottom:1px solid #E1E1E1;">🏨 Hoteles · "Sus huéspedes VIP merecen llegar sin estrés..."</div>
+      <div style="padding:8px 0;border-bottom:1px solid #E1E1E1;">🚢 Navieras · "Logística de tripulación AILA ↔ puerto..."</div>
+      <div style="padding:8px 0;border-bottom:1px solid #E1E1E1;">🛂 Embajadas · "Transporte VIP para personal diplomático..."</div>
+      <div style="padding:8px 0;border-bottom:1px solid #E1E1E1;">✈️ Agencias · "Comisión 15% por cada transfer reservado..."</div>
+      <div style="padding:8px 0;">🏢 Corporativo · "Transporte ejecutivo confiable para su equipo..."</div>
+    </div>
+    <div style="margin-top:12px;padding:10px;background:#FEF3C7;border-left:4px solid #D97706;border-radius:6px;font-size:12px;color:#92400E;">
+      ⚠️ Cuenta MailerLite cerrada. Reactivar para enviar campañas.
+    </div>
+  </div>
+</div>
+
+<!-- Higgsfield + NCF + Sistema -->
+<div class="grid-2" style="margin-top:24px;">
+  <div class="card">
+    <h2>🎬 Cola de Reels UGC (Higgsfield)</h2>
+    <div style="font-size:13px;color:#1A1A1A;">
+      <div style="padding:8px 0;border-bottom:1px solid #E1E1E1;">
+        <strong>10 Reels en cola</strong> · 4-5 semanas de contenido
+      </div>
+      <div style="padding:8px 0;border-bottom:1px solid #E1E1E1;">🚖 POV Casa de Campo · 15 jun 12:00</div>
+      <div style="padding:8px 0;border-bottom:1px solid #E1E1E1;">🎬 Behind the scenes · 17 jun 19:00</div>
+      <div style="padding:8px 0;border-bottom:1px solid #E1E1E1;">🚫 Cómo NO contratar en AILA · 19 jun 20:00</div>
+      <div style="padding:8px 0;border-bottom:1px solid #E1E1E1;">📅 14 años en RD · 22 jun 12:00</div>
+      <div style="padding:8px 0;color:#6B7280;font-size:12px;">+ 6 Reels más programados hasta jul</div>
+    </div>
+    <div style="margin-top:12px;padding:10px;background:#FEF3C7;border-left:4px solid #D97706;border-radius:6px;font-size:12px;color:#92400E;">
+      ⚠️ Higgsfield AI requiere plan PLUS $49/mes · 1,000 créditos = ~200 videos
+    </div>
+  </div>
+  <div class="card">
+    <h2>🧾 Sistema NCF DGII</h2>
+    <div style="font-size:13px;color:#1A1A1A;">
+      <div style="padding:8px 0;border-bottom:1px solid #E1E1E1;">✅ <strong>5 tipos NCF</strong> soportados</div>
+      <div style="padding:8px 0;border-bottom:1px solid #E1E1E1;">📋 B01 · Factura Crédito Fiscal (B2B)</div>
+      <div style="padding:8px 0;border-bottom:1px solid #E1E1E1;">📋 B02 · Factura Consumo (B2C)</div>
+      <div style="padding:8px 0;border-bottom:1px solid #E1E1E1;">📋 B14 · Factura Gubernamental (embajadas)</div>
+      <div style="padding:8px 0;border-bottom:1px solid #E1E1E1;">📋 B15 · Régimen Especial</div>
+      <div style="padding:8px 0;border-bottom:1px solid #E1E1E1;">📋 B04 · Nota de Crédito</div>
+      <div style="padding:8px 0;color:#0E7C3A;">✅ ITBIS 18% automático · Correlativo activo · Reporte DGII mensual</div>
+    </div>
+  </div>
+</div>
+
+<!-- Estado del Sistema OPC -->
+<div class="card" style="margin-top:24px;">
+  <h2>🔧 Sistema OPC — Estado de Componentes</h2>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;font-size:13px;">
+    <div style="padding:10px;background:#DCFCE7;border-left:4px solid #0E7C3A;border-radius:6px;">✅ Airtable · 26 tablas</div>
+    <div style="padding:10px;background:#DCFCE7;border-left:4px solid #0E7C3A;border-radius:6px;">✅ WhatsApp Green API · autorizado</div>
+    <div style="padding:10px;background:#DCFCE7;border-left:4px solid #0E7C3A;border-radius:6px;">✅ HubSpot CRM · 54 companies + 10 deals</div>
+    <div style="padding:10px;background:#DCFCE7;border-left:4px solid #0E7C3A;border-radius:6px;">✅ MailerLite · 6 grupos creados</div>
+    <div style="padding:10px;background:#FEF3C7;border-left:4px solid #D97706;border-radius:6px;">⚠️ Higgsfield AI · requiere $49/mes</div>
+    <div style="padding:10px;background:#DCFCE7;border-left:4px solid #0E7C3A;border-radius:6px;">✅ Sistema NCF DGII · operativo</div>
+    <div style="padding:10px;background:#DCFCE7;border-left:4px solid #0E7C3A;border-radius:6px;">✅ Agente Prospector · 54 prospects</div>
+    <div style="padding:10px;background:#DCFCE7;border-left:4px solid #0E7C3A;border-radius:6px;">✅ Agente Despachador · Uber-style</div>
+    <div style="padding:10px;background:#DCFCE7;border-left:4px solid #0E7C3A;border-radius:6px;">✅ Sistema QR Bidireccional · HMAC firmado</div>
+    <div style="padding:10px;background:#DCFCE7;border-left:4px solid #0E7C3A;border-radius:6px;">✅ Agente Coordinador (Monserrat)</div>
+    <div style="padding:10px;background:#DCFCE7;border-left:4px solid #0E7C3A;border-radius:6px;">✅ Agente Financiero · liquidación quincenal</div>
+    <div style="padding:10px;background:#DCFCE7;border-left:4px solid #0E7C3A;border-radius:6px;">✅ Agente Reportes · WhatsApp 7AM</div>
+  </div>
+</div>
+
+</div>
+
+<script>
+const API_BASE = "http://localhost:5002";
+
+let chartHoras, chartCanales, chartFacturacion;
+
+async function api(path) {
+  const r = await fetch(`${API_BASE}${path}`);
+  return r.ok ? r.json() : null;
+}
+
+function rd(n) {
+  return `RD$${Math.round(n || 0).toLocaleString('es-DO')}`;
+}
+
+async function cargarTodo() {
+  document.getElementById('header-info').textContent = 'Refrescando...';
+
+  // KPIs - usar el endpoint de reporte diario (datos del 6-jun)
+  const reporte = await api('/api/v2/reporte/diario?hoy=2026-06-07');
+  if (reporte && reporte.datos) {
+    const d = reporte.datos;
+    document.getElementById('kpi-servicios-ayer').textContent = d.servicios_completados_ayer;
+    document.getElementById('kpi-servicios-delta').textContent =
+      `${d.servicios_completados_ayer} completados · ${reporte.datos.incidencias_abiertas || 0} incidencias`;
+    document.getElementById('kpi-facturacion-ayer').textContent = rd(d.facturacion_ayer_rd);
+    document.getElementById('kpi-facturacion-delta').textContent = '6-jun 2026';
+    document.getElementById('kpi-ganancia-ayer').textContent = rd(d.ganancia_operativa_ayer_rd);
+    document.getElementById('kpi-ganancia-delta').textContent =
+      `${((d.ganancia_operativa_ayer_rd / d.facturacion_ayer_rd) * 100).toFixed(1)}% margen`;
+    document.getElementById('kpi-conductores').textContent = d.conductores_activos;
+  }
+
+  // Gráfico de horas (datos reales del 6-jun)
+  await dibujarHoras();
+  await dibujarCanales();
+  await dibujarFacturacion();
+  await cargarUltimosServicios();
+  await cargarClientes();
+
+  const ahora = new Date().toLocaleString('es-DO', { dateStyle: 'medium', timeStyle: 'short' });
+  document.getElementById('header-info').textContent = `Última actualización: ${ahora}`;
+}
+
+async function dibujarHoras() {
+  // Datos reales del 6-jun: 21:00 → 7, 22:00 → 4, 23:00 → 1, 00:00 → 4
+  const horas = ['20:00', '21:00', '22:00', '23:00', '00:00'];
+  const valores = [0, 7, 4, 1, 4];
+
+  if (chartHoras) chartHoras.destroy();
+  chartHoras = new Chart(document.getElementById('chart-horas'), {
+    type: 'bar',
+    data: {
+      labels: horas,
+      datasets: [{
+        label: 'Servicios',
+        data: valores,
+        backgroundColor: '#1E5F8E',
+        borderRadius: 6,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        y: { beginAtZero: true, ticks: { stepSize: 1 } }
+      }
+    }
+  });
+}
+
+async function dibujarCanales() {
+  const labels = ['Intelcia', 'VIP', 'Aeropuerto B2C', 'Naviera', 'Redes'];
+  const data = [16, 0, 0, 0, 0];  // Por ahora solo Intelcia tiene servicios reales
+
+  if (chartCanales) chartCanales.destroy();
+  chartCanales = new Chart(document.getElementById('chart-canales'), {
+    type: 'doughnut',
+    data: {
+      labels: labels,
+      datasets: [{
+        data: data,
+        backgroundColor: ['#0A2540', '#F2A900', '#1E5F8E', '#0E7C3A', '#5B2C87'],
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { position: 'right', labels: { font: { size: 11 } } }
+      }
+    }
+  });
+}
+
+async function dibujarFacturacion() {
+  // Simulación últimos 30 días con valor real del 6-jun
+  const labels = [];
+  const data = [];
+  const hoy = new Date('2026-06-10');
+  for (let i = 29; i >= 0; i--) {
+    const d = new Date(hoy);
+    d.setDate(d.getDate() - i);
+    labels.push(d.toLocaleDateString('es-DO', { day: 'numeric', month: 'short' }));
+    // Solo el 6-jun tiene datos reales
+    if (d.getDate() === 6 && d.getMonth() === 5) {
+      data.push(12200);
+    } else {
+      data.push(0);
+    }
+  }
+
+  if (chartFacturacion) chartFacturacion.destroy();
+  chartFacturacion = new Chart(document.getElementById('chart-facturacion'), {
+    type: 'line',
+    data: {
+      labels: labels,
+      datasets: [{
+        label: 'Facturación (RD$)',
+        data: data,
+        borderColor: '#0E7C3A',
+        backgroundColor: 'rgba(14, 124, 58, 0.1)',
+        borderWidth: 2,
+        fill: true,
+        tension: 0.3,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        y: {
+          beginAtZero: true,
+          ticks: { callback: v => rd(v) }
+        }
+      }
+    }
+  });
+}
+
+async function cargarUltimosServicios() {
+  // Para el MVP usamos data hardcodeada del 6-jun
+  // En producción esto se traerá del endpoint /api/v2/servicios/recientes
+  const html = `
+    <table>
+      <thead><tr><th>Hora</th><th>Ruta</th><th>Pax</th><th>Tarifa</th><th>Estado</th></tr></thead>
+      <tbody>
+        <tr><td>21:00</td><td>Ruta 1 — Crismeyris S.</td><td>3</td><td>RD$650</td><td><span class="badge success">Completado</span></td></tr>
+        <tr><td>21:00</td><td>Ruta 2 — Grisbelle M.</td><td>2</td><td>RD$650</td><td><span class="badge success">Completado</span></td></tr>
+        <tr><td>21:00</td><td>Ruta 3 — Yulissa J.</td><td>2</td><td>RD$950</td><td><span class="badge success">Completado</span></td></tr>
+        <tr><td>21:00</td><td>Ruta 5 — Merlin B.</td><td>4</td><td>RD$950</td><td><span class="badge success">Completado</span></td></tr>
+        <tr><td>22:00</td><td>Ruta 3 — Willy R.</td><td>4</td><td>RD$950</td><td><span class="badge success">Completado</span></td></tr>
+        <tr><td>23:00</td><td>Ruta 1 — Josue D.</td><td>3</td><td>RD$650</td><td><span class="badge success">Completado</span></td></tr>
+        <tr><td>00:00</td><td>Ruta 2 — Pedro S.</td><td>6</td><td>RD$850</td><td><span class="badge success">Completado</span></td></tr>
+      </tbody>
+    </table>`;
+  document.getElementById('tabla-servicios').innerHTML = html;
+}
+
+async function cargarClientes() {
+  const html = `
+    <table>
+      <thead><tr><th>Cliente</th><th>Tipo</th><th>Plazo pago</th><th>Estado</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>Intelcia</strong><br><span style="color:#6B7280;font-size:11px">Punta Arrecife</span></td>
+          <td>Call Center</td>
+          <td>30 días</td>
+          <td><span class="badge success">Activo</span></td>
+        </tr>
+      </tbody>
+    </table>
+    <div style="margin-top:12px;font-size:12px;color:#6B7280">
+      ➕ Cargar más clientes B2B cuando los captes con el Agente Prospector (Fase 3)
+    </div>`;
+  document.getElementById('tabla-clientes').innerHTML = html;
+}
+
+// Cargar al inicio
+window.addEventListener('DOMContentLoaded', cargarTodo);
+
+// Auto-refresh cada 2 minutos
+setInterval(cargarTodo, 120000);
+</script>
+
+<!-- ════════════════════════════════════════════════════════════ -->
+<!-- TARJETA: CONTACTOS CORPORATIVOS @emovils.com                 -->
+<!-- ════════════════════════════════════════════════════════════ -->
+<div class="card" style="margin-top:24px;">
+  <h2>📬 Buzones Corporativos @emovils.com</h2>
+  <div style="font-size:13px;color:#1A1A1A;">
+    <div style="padding:10px 0;border-bottom:1px solid #E1E1E1;display:flex;justify-content:space-between;">
+      <span><strong>info@emovils.com</strong> · Entrada general</span>
+      <span style="color:#6B7280;">→ Monserrat (Claude) · auto-resp ✓</span>
+    </div>
+    <div style="padding:10px 0;border-bottom:1px solid #E1E1E1;display:flex;justify-content:space-between;">
+      <span><strong>reservas@emovils.com</strong> · Confirmaciones + QRs</span>
+      <span style="color:#6B7280;">→ Sistema automático</span>
+    </div>
+    <div style="padding:10px 0;border-bottom:1px solid #E1E1E1;display:flex;justify-content:space-between;">
+      <span><strong>ventas@emovils.com</strong> · B2B + HubSpot</span>
+      <span style="color:#6B7280;">→ Noe (directo) · auto-resp ✓</span>
+    </div>
+    <div style="padding:10px 0;border-bottom:1px solid #E1E1E1;display:flex;justify-content:space-between;">
+      <span><strong>soporte@emovils.com</strong> · Quejas / incidencias</span>
+      <span style="color:#6B7280;">→ Monserrat→Supervisor→Noe</span>
+    </div>
+    <div style="padding:10px 0;border-bottom:1px solid #E1E1E1;display:flex;justify-content:space-between;">
+      <span><strong>facturacion@emovils.com</strong> · Facturas NCF B2B</span>
+      <span style="color:#6B7280;">→ Contadora + CC Noe</span>
+    </div>
+    <div style="padding:10px 0;border-bottom:1px solid #E1E1E1;display:flex;justify-content:space-between;">
+      <span><strong>rrhh@emovils.com</strong> · Onboarding choferes</span>
+      <span style="color:#6B7280;">→ Admin + Noe</span>
+    </div>
+    <div style="padding:10px 0;border-bottom:1px solid #E1E1E1;display:flex;justify-content:space-between;">
+      <span><strong>alertas@emovils.com</strong> · Alertas sistema OPC</span>
+      <span style="color:#6B7280;">→ nvasquez@</span>
+    </div>
+    <div style="padding:10px 0;border-bottom:1px solid #E1E1E1;display:flex;justify-content:space-between;">
+      <span><strong>nvasquez@emovils.com</strong> 🔒 Privado dueño</span>
+      <span style="color:#6B7280;">→ Solo Noe · reporte 7AM diario</span>
+    </div>
+    <div style="padding:10px 0;display:flex;justify-content:space-between;">
+      <span><strong>chofer01-16@emovils.com</strong> · 16 choferes propios</span>
+      <span style="color:#6B7280;">→ Recibos quincena + docs</span>
+    </div>
+  </div>
+  <div style="margin-top:14px;padding:10px;background:#E0F2FE;border-left:4px solid #0284C7;border-radius:6px;font-size:12px;color:#0C4A6E;">
+    💡 <strong>Proveedor real:</strong> Banahosting (cPanel · servidor single-7060)<br>
+    💡 <strong>SMTP:</strong> mail.emovils.com:465 SSL<br>
+    💡 <strong>IMAP:</strong> mail.emovils.com:993 SSL<br>
+    💡 <strong>cPanel:</strong> <a href="https://single-7060.banahosting.com:2083" target="_blank">single-7060.banahosting.com:2083</a> · <strong>Webmail:</strong> <a href="https://single-7060.banahosting.com:2096" target="_blank">:2096</a><br>
+    📧 <strong>Envíos masivos B2B:</strong> Resend.com con dominio emovils.com verificado (3K/mes gratis)
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════ -->
+<!-- MONSERRAT — AGENTE CLAUDE (NO BOT)                           -->
+<!-- ════════════════════════════════════════════════════════════ -->
+<div class="card" style="margin-top:24px;background:linear-gradient(135deg,#1E5F8E 0%,#2C7DB3 100%);color:white;">
+  <h2 style="color:white;">🧠 Monserrat · Agente Claude</h2>
+  <div style="font-size:14px;line-height:1.7;">
+    ⚠️ <strong>NO es un bot.</strong> Es un agente Claude Sonnet 4.6 con:
+    <ul style="margin:10px 0 10px 20px;">
+      <li>✅ Memoria conversacional por cliente (últimos 12 turnos)</li>
+      <li>✅ Tool-use real: <code style="background:rgba(255,255,255,0.2);padding:2px 6px;border-radius:4px;">cotizar_servicio</code>, <code style="background:rgba(255,255,255,0.2);padding:2px 6px;border-radius:4px;">crear_reserva</code>, <code style="background:rgba(255,255,255,0.2);padding:2px 6px;border-radius:4px;">escalar_a_humano</code>, <code style="background:rgba(255,255,255,0.2);padding:2px 6px;border-radius:4px;">consultar_estado_reserva</code></li>
+      <li>✅ Decisiones autónomas (no árbol if/else)</li>
+      <li>✅ Identidad dominicana persistente en system prompt</li>
+      <li>✅ Atiende WhatsApp 829-861-0090 + info@emovils.com</li>
+    </ul>
+    Fallback heurístico solo si <code style="background:rgba(255,255,255,0.2);padding:2px 6px;border-radius:4px;">ANTHROPIC_API_KEY</code> falla.
+  </div>
+</div>
+</body>
+</html>

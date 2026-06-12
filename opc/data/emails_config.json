@@ -1,0 +1,103 @@
+{
+  "descripcion": "Configuración de correos corporativos Emovils y reglas de routing automático del sistema OPC.",
+  "fecha_actualizacion": "2026-06-11",
+  "emails": {
+    "info": {
+      "direccion": "info@emovils.com",
+      "rol": "Entrada general · Web form · Preguntas B2C · Reseñas",
+      "lee": "Monserrat (Agente Coordinador) primero, escala a nvasquez@ si requiere humano",
+      "volumen_esperado": "alto",
+      "auto_respuesta_activada": true,
+      "auto_respuesta_template": "Hola, recibimos tu mensaje. Para una respuesta más rápida escribenos por WhatsApp 829-861-0090 (Monserrat te atiende en segundos). Si tu consulta requiere atencion personalizada, te respondemos por aqui en menos de 4 horas.",
+      "from_envios_sistema": "Emovils <info@emovils.com>"
+    },
+    "reservas": {
+      "direccion": "reservas@emovils.com",
+      "rol": "Confirmaciones automáticas · Recordatorios pre-servicio · QRs · Recibos",
+      "lee": "Auto-archivo (cliente lo recibe)",
+      "volumen_esperado": "muy alto",
+      "auto_respuesta_activada": false,
+      "from_envios_sistema": "Emovils Reservas <reservas@emovils.com>",
+      "tipos_emails_enviados": [
+        "Confirmación de reserva con QR",
+        "Recordatorio 24h antes",
+        "Recordatorio 2h antes (servicios programados)",
+        "Recibo post-servicio",
+        "Encuesta de satisfacción"
+      ]
+    },
+    "ventas": {
+      "direccion": "ventas@emovils.com",
+      "rol": "Prospects B2B · HubSpot deals · Outreach respuestas · Cotizaciones grandes",
+      "lee": "Noe (dueño) diariamente",
+      "volumen_esperado": "medio (alto valor)",
+      "auto_respuesta_activada": true,
+      "auto_respuesta_template": "Recibimos tu interes en Emovils. Un especialista corporativo te responde personalmente en menos de 24 horas para coordinar reunion. Si es urgente, WhatsApp 829-861-0090.",
+      "from_envios_sistema": "Noe Vasquez · Emovils <ventas@emovils.com>",
+      "tipos_emails_enviados": [
+        "Outreach cold a prospects B2B (54 empresas en HubSpot)",
+        "Propuestas comerciales corporativas",
+        "Cotizaciones contratos mensuales",
+        "Seguimiento deals HubSpot",
+        "Facturas mensuales B2B (NCF)"
+      ]
+    },
+    "nvasquez": {
+      "direccion": "nvasquez@emovils.com",
+      "rol": "Privado dueño · Escalaciones críticas · Alertas urgentes",
+      "lee": "Solo Noe",
+      "volumen_esperado": "bajo (alta importancia)",
+      "auto_respuesta_activada": false,
+      "from_envios_sistema": "Sistema Emovils OPC <nvasquez@emovils.com>",
+      "tipos_alertas_recibidas": [
+        "🚨 Servicio sin chofer (5 rechazos)",
+        "🚨 Reseña 1 estrella",
+        "🚨 Cliente con queja crítica",
+        "🚨 Pago rechazado de monto >$1,000",
+        "🚨 QR falsificado detectado",
+        "🚨 Accidente reportado",
+        "📊 Reporte diario 7AM",
+        "💰 Liquidación quincenal lista para aprobar",
+        "⚠️ Documentos vehículos vencen en 7 días"
+      ]
+    }
+  },
+  "reglas_routing_automatico": {
+    "entrada_web_form": {
+      "envia_a": "info@emovils.com",
+      "copia_a": ["reservas@emovils.com"],
+      "trigger_sistema": "crear_lead_airtable + WhatsApp_a_cliente_inmediato"
+    },
+    "outreach_b2b": {
+      "envia_desde": "ventas@emovils.com",
+      "respuestas_van_a": "ventas@emovils.com",
+      "trigger_sistema": "alerta_whatsapp_noe si responde"
+    },
+    "queja_critica": {
+      "envia_a": "info@emovils.com",
+      "escala_a": "nvasquez@emovils.com",
+      "trigger_sistema": "WhatsApp_noe_inmediato + llamar_cliente_en_15min"
+    },
+    "confirmacion_reserva": {
+      "envia_desde": "reservas@emovils.com",
+      "envia_a": "cliente",
+      "trigger_sistema": "genera_qr + adjunta_pdf"
+    },
+    "factura_b2b_mensual": {
+      "envia_desde": "ventas@emovils.com",
+      "envia_a": "cliente_b2b_email_facturacion",
+      "trigger_sistema": "genera_pdf_ncf + registra_dgii"
+    },
+    "alertas_sistema": {
+      "envia_a": "nvasquez@emovils.com",
+      "copia_a": "WhatsApp_829-861-0090",
+      "frecuencia": "tiempo_real"
+    }
+  },
+  "configuracion_pendiente": {
+    "imap_pop3": "Sin configurar — Sistema aún no LEE emails entrantes (solo envía)",
+    "smtp_envio": "Necesita configurar SMTP en .env: EMAIL_SMTP_HOST, EMAIL_SMTP_USER, EMAIL_SMTP_PASS",
+    "proveedor_recomendado": "Si los emails están en Hostinger/cPanel: usa smtp.hostinger.com puerto 465 SSL. Si están en Gmail Workspace: smtp.gmail.com puerto 587 TLS.",
+    "alternativa_resend": "Mejor opcion para volumen: usar Resend.com (3,000 emails/mes gratis) con dominio emovils.com verificado"
+  }
+}

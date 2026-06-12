@@ -1,0 +1,184 @@
+{
+  "descripcion": "Directorio completo de correos corporativos @emovils.com — TODOS los empleados tienen correo propio (norma OPC 2026).",
+  "fecha_actualizacion": "2026-06-11",
+  "convencion_nombre": "primera_inicial + apellido @emovils.com (ej: nvasquez@emovils.com)",
+  "dominio": "emovils.com",
+  "total_buzones": 24,
+  "buzones_corporativos_generales": {
+    "info@emovils.com": {
+      "tipo": "general",
+      "rol": "Entrada pública — web form, reseñas, preguntas B2C",
+      "lee_humano": "Monserrat (Agente Claude) primero · escala a nvasquez@",
+      "auto_respuesta": true
+    },
+    "reservas@emovils.com": {
+      "tipo": "automatico",
+      "rol": "Envíos sistema: confirmaciones, QRs, recordatorios, recibos",
+      "lee_humano": "Solo lectura — el cliente recibe",
+      "auto_respuesta": false
+    },
+    "ventas@emovils.com": {
+      "tipo": "comercial",
+      "rol": "Prospects B2B, HubSpot, cotizaciones grandes, NCF B2B",
+      "lee_humano": "Noe Vásquez (dueño)",
+      "auto_respuesta": true
+    },
+    "soporte@emovils.com": {
+      "tipo": "operativo",
+      "rol": "Quejas, incidencias, reportes de servicio",
+      "lee_humano": "Monserrat → Supervisor → Noe (escalación 3 niveles)",
+      "auto_respuesta": true
+    },
+    "facturacion@emovils.com": {
+      "tipo": "contable",
+      "rol": "Facturas, NCF, pagos B2B, recibos de empresas",
+      "lee_humano": "Contadora · copia a Noe",
+      "auto_respuesta": false
+    },
+    "rrhh@emovils.com": {
+      "tipo": "interno",
+      "rol": "Onboarding choferes, documentos, vencimientos",
+      "lee_humano": "Admin · Noe",
+      "auto_respuesta": false
+    },
+    "alertas@emovils.com": {
+      "tipo": "sistema",
+      "rol": "Alertas técnicas: caídas, errores, monitoreo Railway/Airtable",
+      "lee_humano": "Solo Noe",
+      "auto_respuesta": false
+    }
+  },
+  "directivos_y_administracion": {
+    "nvasquez@emovils.com": {
+      "nombre": "Noe Vásquez",
+      "puesto": "Dueño · CEO OPC",
+      "whatsapp": "+1 829-861-0090",
+      "permisos_sistema": ["TODO"],
+      "recibe_alertas_nivel": ["CRITICA", "ALTA", "MEDIA", "REPORTE_DIARIO"]
+    },
+    "supervisor@emovils.com": {
+      "nombre": "Supervisor Operaciones (a contratar / rotativo)",
+      "puesto": "Supervisor de turno",
+      "whatsapp": "—",
+      "permisos_sistema": ["dispatch", "ver_servicios", "ver_choferes", "validar_qr"],
+      "recibe_alertas_nivel": ["CRITICA", "ALTA"]
+    },
+    "contabilidad@emovils.com": {
+      "nombre": "Contadora Externa (Dolores)",
+      "puesto": "Contabilidad y DGII",
+      "whatsapp": "—",
+      "permisos_sistema": ["ver_facturas", "ver_ncf", "exportar_libros"],
+      "recibe_alertas_nivel": ["REPORTE_QUINCENAL", "VENCIMIENTOS_DGII"]
+    },
+    "admin@emovils.com": {
+      "nombre": "Asistente Administrativa",
+      "puesto": "Admin y documentos",
+      "whatsapp": "—",
+      "permisos_sistema": ["onboarding", "documentos", "vencimientos"],
+      "recibe_alertas_nivel": ["DOC_VENCE_7D", "DOC_VENCE_30D"]
+    }
+  },
+  "supervisores": {
+    "supervisor_turno_dia@emovils.com": {
+      "nombre": "Supervisor Turno Día (6AM-6PM)",
+      "asignado_a": "POR_DEFINIR",
+      "telefono": "—",
+      "recibe": ["servicios_dia", "incidencias", "qr_validaciones"]
+    },
+    "supervisor_turno_noche@emovils.com": {
+      "nombre": "Supervisor Turno Noche (6PM-6AM)",
+      "asignado_a": "POR_DEFINIR",
+      "telefono": "—",
+      "recibe": ["servicios_noche", "intelcia_nocturno", "incidencias"]
+    }
+  },
+  "choferes_propios": {
+    "convencion": "primera_inicial+apellido@emovils.com (todos los 16 choferes propios)",
+    "nota": "Cada chofer recibe credenciales en onboarding. Email es para: documentos personales, recibos de pago quincenal, notificaciones de turnos, capacitaciones.",
+    "buzones_template": [
+      "chofer01@emovils.com",
+      "chofer02@emovils.com",
+      "chofer03@emovils.com",
+      "chofer04@emovils.com",
+      "chofer05@emovils.com",
+      "chofer06@emovils.com",
+      "chofer07@emovils.com",
+      "chofer08@emovils.com",
+      "chofer09@emovils.com",
+      "chofer10@emovils.com",
+      "chofer11@emovils.com",
+      "chofer12@emovils.com",
+      "chofer13@emovils.com",
+      "chofer14@emovils.com",
+      "chofer15@emovils.com",
+      "chofer16@emovils.com"
+    ],
+    "tipos_correos_que_reciben": [
+      "Recibo de pago quincenal (Q1 y Q2)",
+      "Asignación de servicio (backup de WhatsApp)",
+      "Aviso de documento vencido (cédula, licencia, marbete)",
+      "Capacitación o reunión convocada",
+      "Acuerdo de afiliación firmado (PDF)"
+    ]
+  },
+  "choferes_afiliados": {
+    "convencion": "El afiliado usa su correo personal — Emovils envía recibos a su email registrado en Airtable {Conductores.Email}",
+    "nota": "12 choferes afiliados. NO se les crea correo @emovils.com (no son empleados directos).",
+    "tipos_correos_que_reciben": [
+      "Recibo quincenal de comisión (70%)",
+      "Aviso de servicio asignado",
+      "Acuerdo de afiliación firmado",
+      "Aviso de documento vencido"
+    ]
+  },
+  "configuracion_smtp_actual": {
+    "proveedor_emails_corporativos": "BANAHOSTING (cPanel + Roundcube)",
+    "servidor_fisico": "single-7060.banahosting.com",
+    "panel_admin_cpanel": "https://single-7060.banahosting.com:2083",
+    "webmail_roundcube": "https://single-7060.banahosting.com:2096",
+    "smtp_host": "mail.emovils.com",
+    "smtp_puerto": 465,
+    "smtp_seguridad": "SSL",
+    "smtp_alternativo": "single-7060.banahosting.com:465 SSL",
+    "imap_host": "mail.emovils.com",
+    "imap_puerto": 993,
+    "imap_seguridad": "SSL",
+    "pop3_host": "mail.emovils.com",
+    "pop3_puerto": 995,
+    "estado_nvasquez": "✓ ACTIVO · 1762 sin leer · 4684 totales · MUY activo",
+    "buzones_a_crear_en_cpanel": [
+      "info@emovils.com",
+      "reservas@emovils.com",
+      "ventas@emovils.com",
+      "soporte@emovils.com",
+      "facturacion@emovils.com",
+      "rrhh@emovils.com",
+      "alertas@emovils.com",
+      "supervisor@emovils.com",
+      "contabilidad@emovils.com",
+      "admin@emovils.com",
+      "chofer01@emovils.com a chofer16@emovils.com"
+    ],
+    "instrucciones_crear_buzon_cpanel": [
+      "1. Entrar a https://single-7060.banahosting.com:2083 (cPanel admin)",
+      "2. Buscar 'Email Accounts' o 'Cuentas de correo'",
+      "3. Click '+ Crear' / '+ Create'",
+      "4. Username: info (o ventas, reservas, etc) · Dominio: emovils.com",
+      "5. Asignar contrasena segura (anotarla en password manager)",
+      "6. Asignar cuota (5 GB recomendado por buzon)",
+      "7. Repetir para los 29 buzones"
+    ],
+    "nota_importante": "Banahosting cPanel incluye buzones ILIMITADOS en planes Reseller/Business. Verificar plan actual — probablemente puedes crear los 29 buzones SIN COSTO ADICIONAL.",
+    "alerta_volumen": "1762 emails sin leer en nvasquez@. Monserrat-Agente puede triagear: clasificar spam vs operativo vs personal, autoresponder, archivar masivamente. Funcion 'triage_inbox' a implementar.",
+    "para_envios_volumen_alto": "Resend.com con dominio verificado emovils.com — 3,000 emails/mes gratis (usar para confirmaciones automaticas, outreach B2B y alertas masivas; no es buzon sino API de envio)"
+  },
+  "matriz_acceso_sistema_opc": {
+    "nvasquez@emovils.com": "ADMIN_TOTAL",
+    "supervisor@emovils.com": "DISPATCH_VALIDACION",
+    "supervisor_turno_dia@emovils.com": "DISPATCH_TURNO_DIA",
+    "supervisor_turno_noche@emovils.com": "DISPATCH_TURNO_NOCHE",
+    "contabilidad@emovils.com": "READ_FACTURAS_NCF",
+    "admin@emovils.com": "ONBOARDING_DOCUMENTOS",
+    "choferXX@emovils.com": "VIEW_PROPIOS_SERVICIOS"
+  }
+}

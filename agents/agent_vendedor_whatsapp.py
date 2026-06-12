@@ -1,19 +1,13 @@
 """
-Emovils OPC — Agente 3: Vendedor WhatsApp (Monserrat)
+Emovils OPC — Agente 3: Vendedor WhatsApp
 Responsabilidad: Califica leads, cotiza, maneja objeciones,
 da seguimiento y empuja al cierre. Canal principal de ventas.
 
-LLM: OpenAI GPT-4o-mini (más económico, muy rápido)
-Voz: OpenAI TTS "nova" (disponible bajo demanda)
-QR: QR.io para verificación de recogida
-
-Flujo: WhatsApp → preguntas básicas → cotización → confirmación → pago → reserva → QR
+Flujo: WhatsApp → preguntas básicas → cotización → confirmación → pago → reserva
 """
-import os
+import anthropic
 import logging
-import secrets
-from openai import OpenAI
-from config.settings import OPENAI_API_KEY, OPENAI_MODEL, ANTHROPIC_API_KEY
+from config.settings import ANTHROPIC_API_KEY, CLAUDE_MODEL
 from lib.airtable_api import (
     create_lead, update_lead_status, get_lead_by_whatsapp,
     create_reserva, LeadStatus
@@ -21,40 +15,19 @@ from lib.airtable_api import (
 from lib.whatsapp_api import send_text, send_quote, SCRIPTS, parse_webhook_event
 from lib.paypal_api import get_payment_link
 from lib.google_maps import estimate_price
-from lib.qr_generator import generate_pickup_qr, generate_qr_message
-from lib.voice_agent import send_voice_message, should_send_voice
-from workflows.wf_reserva_urgente import detectar_urgencia, PROMPT_MODO_URGENTE
-from workflows.wf_followup_sequence import schedule_followup_sequence
 
 logger = logging.getLogger(__name__)
+client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-# Cliente OpenAI — LLM principal
-client = OpenAI(api_key=OPENAI_API_KEY)
-
-SYSTEM_PROMPT = """Eres Monserrat, agente inteligente de reservas de Emovils OPC. Eres un agente de IA con plena capacidad de razonamiento, no un bot con respuestas predefinidas. Si alguien pregunta si eres una IA, responde con honestidad y confianza: "Sí, soy Monserrat, agente inteligente de Emovils. Estoy aquí para ayudarte a reservar tu traslado 😊."
-
-IDENTIDAD:
-- Eres un agente inteligente — no un bot con scripts, no una persona humana
-- Puedes razonar, adaptar respuestas, manejar situaciones inesperadas y tomar decisiones
-- Si alguien pregunta algo fuera del guion, usa tu criterio para responder bien
-- Tono: cálido, profesional, natural — como un agente dominicano que sabe lo que hace
-
-OPERAMOS 24/7 — siempre disponible, sin excusas de horario.
+SYSTEM_PROMPT = """Eres el Vendedor WhatsApp de Emovils OPC, empresa de movilidad privada en República Dominicana.
 
 TU FUNCIÓN:
-- Atender a todo cliente que escriba, a cualquier hora
-- Recopilar TODOS los datos necesarios para la reserva
-- Confirmar precio y crear la reserva
-- Informar que un supervisor revisará y asignará conductor
-- Manejar objeciones con inteligencia y cerrar la venta
-
-FLUJO DE RESERVA (sigue este orden):
-1. Saluda calurosamente y pregunta qué necesitan
-2. Recopila los datos de la reserva (ver lista abajo)
-3. Confirma precio al cliente
-4. Crea la reserva → supervisor recibe notificación
-5. Informa: "Su reserva quedó registrada. Un supervisor la revisará y le asignará conductor en breve."
-6. Envía QR de verificación de recogida
+- Atender leads que llegan por WhatsApp
+- Calificar si son candidatos reales para el servicio
+- Obtener la información necesaria para cotizar
+- Enviar cotización con precio exacto y link de pago
+- Manejar objeciones y cerrar la reserva
+- Dar seguimiento si no responden
 
 PRODUCTO PRINCIPAL: Emovils Airport
 - Servicio: Traslado privado desde/hacia AILA/SDQ (Santo Domingo)
@@ -62,29 +35,38 @@ PRODUCTO PRINCIPAL: Emovils Airport
 - Incluye: vehículo confirmado, chofer identificado, seguimiento WhatsApp
 - Promesa: "Precio confirmado antes de su llegada. Sin sorpresas."
 
-DATOS QUE DEBES RECOPILAR:
+PREGUNTAS QUE NECESITAS (para cotizar):
+BÁSICAS (todos los servicios):
 1. Nombre completo del pasajero
 2. Fecha de llegada/salida
 3. Hora estimada
 4. Punto de recogida (aeropuerto u otro)
 5. Destino final
 6. Cantidad de pasajeros
-7. Tipo de servicio (ida / regreso / ida y vuelta)
-8. Número de vuelo y aerolínea (si es aeropuerto)
-9. Cantidad de maletas
-10. Forma de pago preferida (Zelle, PayPal, tarjeta, efectivo)
+7. Tipo de servicio (ida / regreso / espera)
+8. WhatsApp de contacto
+9. Forma de pago (Zelle, tarjeta, PayPal, efectivo)
+
+ADICIONALES para Airport:
+- Número de vuelo
+- Aerolínea
+- Cantidad de maletas
 
 MANEJO DE OBJECIONES:
-- "Es muy caro" → Comparar con el costo/estrés de improvisar; precio confirmado, sin sorpresas
+- "Es muy caro" → Comparar con el costo/estrés de improvisar; recordar que precio es confirmado
 - "Tengo a alguien conocido" → Respetar, pero preguntar si tienen plan B confirmado
 - "¿Es seguro?" → Chofer identificado, empresa formal, seguimiento por WhatsApp
-- "Lo pienso" → Los cupos se llenan; la reserva no requiere pago total ahora
+- "Lo pienso" → Recordar que los cupos se llenan; ofrecer reservar sin pago total ahora
 
-TONO: Natural, cálido, profesional. Máximo 3 oraciones por mensaje. Sin emojis excesivos.
-Responde siempre en español."""
+TONO:
+- Profesional pero cálido, como una empresa seria
+- Nunca presiones agresivamente
+- Sé específico, no genérico
+- Responde rápido (dentro de 15 minutos)
+
+Responde siempre en español. Sé conciso, directo y orientado al cierre."""
 
 CONVERSATION_HISTORY = {}  # En producción, usar Redis o Airtable
-BOOKING_CONFIRMED = {}     # Trackea si ya se envió QR para un número
 
 
 def process_incoming_message(webhook_payload: dict) -> dict:
@@ -116,22 +98,16 @@ def process_incoming_message(webhook_payload: dict) -> dict:
     if wa_number not in CONVERSATION_HISTORY:
         CONVERSATION_HISTORY[wa_number] = []
 
-    turn_number = len(CONVERSATION_HISTORY[wa_number]) // 2
-
     CONVERSATION_HISTORY[wa_number].append({
         "role": "user",
         "content": message_text
     })
 
-    # Detectar si es urgente (viaje hoy / ahora)
-    es_urgente = detectar_urgencia(message_text)
-
-    # Generar respuesta con OpenAI
+    # Generar respuesta con el agente
     response_text = generate_sales_response(
         wa_number=wa_number,
         message=message_text,
-        history=CONVERSATION_HISTORY[wa_number],
-        urgente=es_urgente
+        history=CONVERSATION_HISTORY[wa_number]
     )
 
     CONVERSATION_HISTORY[wa_number].append({
@@ -139,16 +115,8 @@ def process_incoming_message(webhook_payload: dict) -> dict:
         "content": response_text
     })
 
-    # Enviar respuesta: voz en primer saludo, texto el resto
-    if should_send_voice(message_text, turn_number):
-        send_voice_message(wa_number, response_text)
-    else:
-        send_text(wa_number, response_text)
-
-    # Detectar reserva confirmada y enviar QR (solo una vez por número)
-    if _is_booking_confirmed(response_text) and not BOOKING_CONFIRMED.get(wa_number):
-        _send_booking_qr(wa_number, contact_name)
-        BOOKING_CONFIRMED[wa_number] = True
+    # Enviar respuesta
+    send_text(wa_number, response_text)
 
     return {
         "status": "responded",
@@ -157,73 +125,20 @@ def process_incoming_message(webhook_payload: dict) -> dict:
     }
 
 
-def generate_sales_response(wa_number: str, message: str, history: list, urgente: bool = False) -> str:
+def generate_sales_response(wa_number: str, message: str, history: list) -> str:
     """
-    Genera la respuesta de Monserrat usando OpenAI GPT-4o-mini.
-    Si es urgente, usa el prompt de modo rápido para capturar datos mínimos.
+    Genera la respuesta del vendedor usando Claude.
+    Mantiene el historial de la conversación.
     """
     messages = history[-10:]  # Últimos 10 mensajes para contexto
 
-    system = SYSTEM_PROMPT
-    if urgente:
-        system = SYSTEM_PROMPT + "\n\n" + PROMPT_MODO_URGENTE
-        logger.info(f"Modo URGENTE activado para {wa_number[:6]}***")
-
-    response = client.chat.completions.create(
-        model=OPENAI_MODEL,
+    response = client.messages.create(
+        model=CLAUDE_MODEL,
         max_tokens=500,
-        messages=[
-            {"role": "system", "content": system},
-            *messages
-        ]
+        system=SYSTEM_PROMPT,
+        messages=messages
     )
-    return response.choices[0].message.content
-
-
-def _is_booking_confirmed(response_text: str) -> bool:
-    """
-    Detecta si el mensaje de Monserrat indica que se creó una reserva.
-    """
-    keywords = [
-        "reserva fue registrada",
-        "reserva ha sido registrada",
-        "reserva confirmada",
-        "su reserva",
-        "supervisor la revisará",
-        "le asignará conductor",
-        "EMV-"
-    ]
-    text_lower = response_text.lower()
-    return any(kw.lower() in text_lower for kw in keywords)
-
-
-def _send_booking_qr(wa_number: str, nombre: str) -> None:
-    """
-    Genera QR de verificación de recogida y lo envía al pasajero.
-    """
-    try:
-        booking_id = f"EMV-{wa_number[-4:]}-{secrets.token_hex(3).upper()}"
-        token = secrets.token_urlsafe(16)
-
-        qr_data = generate_pickup_qr(
-            booking_id=booking_id,
-            token=token,
-            nombre=nombre or "Pasajero",
-            fecha="Próximo viaje"
-        )
-
-        qr_message = generate_qr_message({
-            "pasajero": nombre or "Pasajero",
-            "booking_id": booking_id,
-            "fecha": "Próximo viaje",
-            "qr_url": qr_data.get("qr_url", "")
-        })
-
-        send_text(wa_number, qr_message)
-        logger.info(f"QR enviado a {wa_number[:6]}*** — booking {booking_id}")
-
-    except Exception as e:
-        logger.error(f"Error enviando QR a {wa_number[:6]}***: {e}")
+    return response.content[0].text
 
 
 def qualify_lead(wa_number: str, conversation_summary: str) -> dict:
@@ -250,15 +165,13 @@ def qualify_lead(wa_number: str, conversation_summary: str) -> dict:
     Responde en formato JSON.
     """
 
-    response = client.chat.completions.create(
-        model=OPENAI_MODEL,
+    response = client.messages.create(
+        model=CLAUDE_MODEL,
         max_tokens=400,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": prompt}
-        ]
+        system=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": prompt}]
     )
-    return {"qualification": response.choices[0].message.content}
+    return {"qualification": response.content[0].text}
 
 
 def send_quotation(
@@ -271,7 +184,7 @@ def send_quotation(
     pasajeros: int = 1
 ) -> dict:
     """
-    Genera y envía cotización con precio y link de pago.
+    Genera y envía cotización con precio y link de pago de Stripe.
     """
     # Calcular precio con Google Maps
     price_info = estimate_price(origen, destino, pasajeros)

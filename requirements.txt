@@ -1,0 +1,26 @@
+# Emovils OPC — Dependencias del Sistema
+# Instalar con: pip install -r requirements.txt
+
+# IA / Agentes
+anthropic>=0.25.0
+
+# APIs externas
+requests>=2.31.0
+# PayPal — usado en RD en lugar de Stripe
+# (usamos requests directamente con PayPal REST API v2, sin SDK)
+
+# Configuración
+python-dotenv>=1.0.0
+
+# Servidor web (para webhooks)
+flask>=3.0.0
+flask-cors>=4.0.0
+
+# Utilidades
+python-dateutil>=2.8.2
+pytz>=2024.1
+
+# Testing
+pytest>=8.0.0
+pytest-mock>=3.12.0
+responses>=0.25.0
