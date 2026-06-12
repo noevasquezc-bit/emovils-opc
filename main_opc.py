@@ -183,23 +183,67 @@ def whatsapp_webhook():
 
     payload = request.get_json(force=True, silent=True) or {}
     try:
-        msg_data = (
-            payload.get("entry", [{}])[0]
-            .get("changes", [{}])[0]
-            .get("value", {})
-        )
-        messages = msg_data.get("messages", [])
-        if not messages:
-            return jsonify({"status": "no_message"})
+        # ───────────────────────────────────────────────────────
+        # PARSER UNIVERSAL: soporta Green API (Noe usa esto) Y Meta
+        # ───────────────────────────────────────────────────────
+        whatsapp = ""
+        texto = ""
+        nombre = ""
 
-        msg = messages[0]
-        whatsapp = msg.get("from", "")
-        texto = msg.get("text", {}).get("body", "")
-        contact = msg_data.get("contacts", [{}])[0]
-        nombre = contact.get("profile", {}).get("name", "")
+        # FORMATO A: Green API (typeWebhook + senderData + messageData)
+        if "typeWebhook" in payload or "senderData" in payload:
+            tipo = payload.get("typeWebhook", "")
+            # Solo procesar mensajes entrantes de texto
+            if tipo and tipo != "incomingMessageReceived":
+                return jsonify({"status": "ignored", "type": tipo})
+
+            sender_data = payload.get("senderData", {})
+            msg_data = payload.get("messageData", {})
+            chat_id = sender_data.get("chatId", "") or sender_data.get("sender", "")
+            # chatId formato: "18298610090@c.us" → +18298610090
+            whatsapp = "+" + chat_id.split("@")[0] if "@" in chat_id else chat_id
+            nombre = sender_data.get("senderName", "") or sender_data.get("chatName", "")
+
+            type_msg = msg_data.get("typeMessage", "")
+            if type_msg in ("textMessage", "extendedTextMessage"):
+                texto = (msg_data.get("textMessageData", {}).get("textMessage", "") or
+                         msg_data.get("extendedTextMessageData", {}).get("text", ""))
+            elif type_msg in ("audioMessage", "pttMessage"):
+                # Nota de voz — placeholder hasta integrar STT
+                texto = "Hola necesito un traslado"  # fallback temporal
+            elif type_msg == "imageMessage":
+                texto = msg_data.get("imageMessageData", {}).get("caption", "") or "Te mando una imagen"
+            else:
+                # Otros tipos (location, contact, etc.) no procesar
+                return jsonify({"status": "ignored", "type_msg": type_msg})
+
+        # FORMATO B: Meta WhatsApp Business API (entry > changes > value)
+        elif "entry" in payload:
+            msg_data = (
+                payload.get("entry", [{}])[0]
+                .get("changes", [{}])[0]
+                .get("value", {})
+            )
+            messages = msg_data.get("messages", [])
+            if not messages:
+                return jsonify({"status": "no_message_meta"})
+            msg = messages[0]
+            whatsapp = msg.get("from", "")
+            texto = msg.get("text", {}).get("body", "")
+            contact = msg_data.get("contacts", [{}])[0]
+            nombre = contact.get("profile", {}).get("name", "")
+
+        else:
+            logger.warning(f"Webhook payload formato desconocido: {list(payload.keys())[:5]}")
+            return jsonify({"status": "unknown_format", "keys": list(payload.keys())[:10]})
 
         if not texto:
-            return jsonify({"status": "no_text"})
+            return jsonify({"status": "no_text", "whatsapp": whatsapp})
+
+        if not whatsapp:
+            return jsonify({"status": "no_sender"})
+
+        logger.info(f"📨 Mensaje de {nombre or 'sin nombre'} ({whatsapp}): {texto[:80]}")
 
         resultado = procesar_mensaje_entrante(
             mensaje=texto,
