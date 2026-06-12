@@ -1,0 +1,112 @@
+{
+  "cliente": "Intelcia",
+  "moneda": "DOP",
+  "fecha_vigencia": "2026-06-10",
+  "descripcion": "Tarifario por cuadrantes — transporte nocturno empleados call center",
+  "rutas": [
+    {
+      "ruta_id": 1,
+      "nombre": "Charles D'Gaulle / San Isidro",
+      "zonas": ["Aut. San Isidro", "Charles D'Gaulle-Mendoza", "Entrada Invivienda", "Charles D'Gaulle-Mella", "Entrada Cancino Adentro", "Cruce Sabana Perdida-Victoria", "Mama Tingo-Villa Mella"],
+      "tarifa_1_4_pax": 650,
+      "tarifa_5_10_pax": 850,
+      "notas": "8PM no puerta a puerta"
+    },
+    {
+      "ruta_id": 2,
+      "nombre": "Ensanche Ozama, Isabelita, Los Mameyes",
+      "zonas": ["Super Lama-Aut. San Isidro", "La Sirena-San Isidro", "Parada San Vicente", "Darío Contreras", "Farolito"],
+      "tarifa_1_4_pax": 650,
+      "tarifa_5_10_pax": 850,
+      "notas": null
+    },
+    {
+      "ruta_id": 3,
+      "nombre": "Las Américas",
+      "zonas": ["Ave. Hipódromo", "Ciudad Juan Bosch", "Garrido", "Las Américas"],
+      "tarifa_1_4_pax": 950,
+      "tarifa_5_10_pax": 1200,
+      "notas": null
+    },
+    {
+      "ruta_id": 4,
+      "nombre": "Los 3 Ojos / Alma Rosa",
+      "zonas": ["Los 3 Ojos", "Alma Rosa I", "Ens. Ozama", "Pidoca", "Los Mina Sur", "Los 3 Brazos"],
+      "tarifa_1_4_pax": 650,
+      "tarifa_5_10_pax": 850,
+      "notas": null
+    },
+    {
+      "ruta_id": 5,
+      "nombre": "San Isidro / Cancino",
+      "zonas": ["Aut. San Isidro", "Invivienda", "Los Trinitarios II", "Carr. Cancino", "El Cachón de la Rubia", "Cancino Adentro", "Punta-Villa Mella"],
+      "tarifa_1_4_pax": 950,
+      "tarifa_5_10_pax": 1200,
+      "notas": null
+    },
+    {
+      "ruta_id": 6,
+      "nombre": "Villa Carmen / Villa Faro",
+      "zonas": ["Aut. San Isidro", "Reparto Villa Carmen", "Villa Faro", "Bello Campo", "Urb. Juan Pablo Duarte", "Cancino II", "Vista Hermosa", "El Brisal", "Megacentro", "Alma Rosa II", "El Rosal"],
+      "tarifa_1_4_pax": 750,
+      "tarifa_5_10_pax": 950,
+      "notas": null
+    },
+    {
+      "ruta_id": 7,
+      "nombre": "Brisas del Edén / San Luis",
+      "zonas": ["Brisas del Edén", "La Toronja", "Hainamosa", "El Almirante", "Los Pinos", "El Tamarindo", "San Luis"],
+      "tarifa_1_4_pax": 750,
+      "tarifa_5_10_pax": 950,
+      "notas": null
+    },
+    {
+      "ruta_id": 8,
+      "nombre": "Pradera del Este / Guerra",
+      "zonas": ["Urb. Pradera del Este", "San Luis", "Bonito-San Isidro", "San Isidro Pueblo", "Urb. V Centenario", "San Antonio de Guerra"],
+      "tarifa_1_4_pax": 750,
+      "tarifa_5_10_pax": 950,
+      "notas": null
+    },
+    {
+      "ruta_id": 9,
+      "nombre": "Isabelita / Villa Duarte",
+      "zonas": ["La Isabelita", "Los Mameyes", "Villa Duarte", "Ave. 25 de Febrero", "Maquiteria", "Los 3 Ojos", "Los Farallones"],
+      "tarifa_1_4_pax": 650,
+      "tarifa_5_10_pax": 850,
+      "notas": null
+    },
+    {
+      "ruta_id": 10,
+      "nombre": "Brisas Oriental / Frailes II",
+      "zonas": ["Brisas Oriental", "Prado Oriental", "Ave. Hipódromo", "Invidorex", "Los Frailes II", "Las Canas", "Villa Eloísa", "Ave. Hípica"],
+      "tarifa_1_4_pax": 950,
+      "tarifa_5_10_pax": 1200,
+      "notas": null
+    },
+    {
+      "ruta_id": 11,
+      "nombre": "Nueva Jerusalén / La Ureña",
+      "zonas": ["Ave. Hipódromo", "Nueva Jerusalén", "CD Juan Bosch", "La Ureña", "Luz María", "Aguas Locas"],
+      "tarifa_1_4_pax": 950,
+      "tarifa_5_10_pax": 1200,
+      "notas": null
+    },
+    {
+      "ruta_id": 12,
+      "nombre": "Cancino Adentro / Sabana Perdida",
+      "zonas": ["Cancino Adentro", "Sabana Perdida", "La Victoria"],
+      "tarifa_1_4_pax": 950,
+      "tarifa_5_10_pax": 1200,
+      "notas": null
+    },
+    {
+      "ruta_id": 13,
+      "nombre": "Boca Chica / La Caleta",
+      "zonas": ["Boca Chica", "La Caleta", "Valiente", "Riviera del Caribe"],
+      "tarifa_1_4_pax": 1300,
+      "tarifa_5_10_pax": 1600,
+      "notas": null
+    }
+  ]
+}

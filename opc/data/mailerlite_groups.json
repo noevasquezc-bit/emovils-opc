@@ -1,0 +1,43 @@
+{
+  "descripcion": "IDs de grupos MailerLite para campañas B2B de Emovils. Generados automáticamente desde Agente Prospector.",
+  "fecha_creacion": "2026-06-11",
+  "cuenta": "etranfers829@gmail.com",
+  "grupos": {
+    "Call_Center": {
+      "id": "190022230648817193",
+      "nombre": "Emovils — Call Centers",
+      "tipo_prospect": "Call_Center",
+      "score_base": 90
+    },
+    "Hotel": {
+      "id": "190023475585352816",
+      "nombre": "Emovils — Hoteles 5 Estrellas",
+      "tipo_prospect": "Hotel",
+      "score_base": 85
+    },
+    "Naviera": {
+      "id": "190023500602279383",
+      "nombre": "Emovils — Navieras y Cruceros",
+      "tipo_prospect": "Naviera",
+      "score_base": 80
+    },
+    "Corporativo_Otro": {
+      "id": "190023530287466404",
+      "nombre": "Emovils — Corporativo Otros",
+      "tipo_prospect": "Corporativo_Otro",
+      "score_base": 75
+    },
+    "Embajada": {
+      "id": "190023548705703871",
+      "nombre": "Emovils — Embajadas y Consulados",
+      "tipo_prospect": "Embajada",
+      "score_base": 70
+    },
+    "Agencia_Viajes": {
+      "id": "190023602890868381",
+      "nombre": "Emovils — Agencias de Viajes VIP",
+      "tipo_prospect": "Agencia_Viajes",
+      "score_base": 70
+    }
+  }
+}

@@ -1,0 +1,68 @@
+{
+  "moneda": "DOP",
+  "fecha_vigencia": "2026-06-10",
+  "descripcion": "Tarifario pre-calculado para consulta rápida. El sistema calcula tarifa real con Google Maps + fórmula. Esta tabla es referencia para Julio/dueño y para publicar al cliente.",
+  "formula_aplicada": {
+    "base_rd": 300,
+    "km_base": 3,
+    "ciudad_por_km": 60,
+    "larga_tier1_km_4_a_25": 110,
+    "larga_tier2_km_26_plus": 40,
+    "recargo_nocturno_pct": 20,
+    "recargo_h1_pct": 10,
+    "hora_nocturno": "23:00 a 06:00",
+    "pax_umbral_h1": 7
+  },
+  "desde_hacia_aila": [
+    {"destino": "Boca Chica", "km": 10, "dia_rd": 1070, "noche_rd": 1284},
+    {"destino": "Juan Dolio", "km": 25, "dia_rd": 2720, "noche_rd": 3264},
+    {"destino": "Guayacanes", "km": 35, "dia_rd": 3120, "noche_rd": 3744},
+    {"destino": "San Pedro de Macorís", "km": 50, "dia_rd": 3720, "noche_rd": 4464},
+    {"destino": "La Romana", "km": 110, "dia_rd": 6120, "noche_rd": 7344},
+    {"destino": "Casa de Campo", "km": 115, "dia_rd": 6320, "noche_rd": 7584},
+    {"destino": "Bayahibe", "km": 130, "dia_rd": 6920, "noche_rd": 8304},
+    {"destino": "Higüey", "km": 150, "dia_rd": 7720, "noche_rd": 9264},
+    {"destino": "Bávaro", "km": 195, "dia_rd": 9520, "noche_rd": 11424},
+    {"destino": "Cap Cana", "km": 195, "dia_rd": 9520, "noche_rd": 11424},
+    {"destino": "Punta Cana", "km": 200, "dia_rd": 9720, "noche_rd": 11664},
+    {"destino": "Uvero Alto", "km": 220, "dia_rd": 10520, "noche_rd": 12624},
+    {"destino": "Santiago", "km": 155, "dia_rd": 7920, "noche_rd": 9504},
+    {"destino": "Jarabacoa", "km": 165, "dia_rd": 8320, "noche_rd": 9984},
+    {"destino": "Constanza", "km": 200, "dia_rd": 9720, "noche_rd": 11664},
+    {"destino": "Puerto Plata", "km": 235, "dia_rd": 11120, "noche_rd": 13344},
+    {"destino": "Sosúa", "km": 250, "dia_rd": 11720, "noche_rd": 14064},
+    {"destino": "Cabarete", "km": 255, "dia_rd": 11920, "noche_rd": 14304},
+    {"destino": "Las Terrenas", "km": 240, "dia_rd": 11320, "noche_rd": 13584},
+    {"destino": "Samaná", "km": 245, "dia_rd": 11520, "noche_rd": 13824}
+  ],
+  "desde_centro_sd": [
+    {"destino": "AILA", "km": 25, "dia_rd": 2720, "noche_rd": 3264},
+    {"destino": "Boca Chica", "km": 30, "dia_rd": 2920, "noche_rd": 3504},
+    {"destino": "Juan Dolio", "km": 40, "dia_rd": 3320, "noche_rd": 3984},
+    {"destino": "La Romana", "km": 130, "dia_rd": 6920, "noche_rd": 8304},
+    {"destino": "Casa de Campo", "km": 135, "dia_rd": 7120, "noche_rd": 8544},
+    {"destino": "Bayahibe", "km": 150, "dia_rd": 7720, "noche_rd": 9264},
+    {"destino": "Punta Cana", "km": 220, "dia_rd": 10520, "noche_rd": 12624},
+    {"destino": "Santiago", "km": 155, "dia_rd": 7920, "noche_rd": 9504},
+    {"destino": "Puerto Plata", "km": 230, "dia_rd": 10920, "noche_rd": 13104},
+    {"destino": "Las Terrenas", "km": 240, "dia_rd": 11320, "noche_rd": 13584}
+  ],
+  "dentro_santo_domingo": [
+    {"trayecto": "Piantini ↔ Naco corto", "km": 3, "dia_rd": 300, "noche_rd": 360},
+    {"trayecto": "Naco → Zona Colonial", "km": 6, "dia_rd": 480, "noche_rd": 576},
+    {"trayecto": "Polígono → Zona Colonial", "km": 7, "dia_rd": 540, "noche_rd": 648},
+    {"trayecto": "Piantini → Megacentro", "km": 8, "dia_rd": 600, "noche_rd": 720},
+    {"trayecto": "Naco → Sambil", "km": 5, "dia_rd": 420, "noche_rd": 504},
+    {"trayecto": "Piantini → UNIBE", "km": 10, "dia_rd": 720, "noche_rd": 864},
+    {"trayecto": "Bella Vista → Cerros Gurabo", "km": 12, "dia_rd": 840, "noche_rd": 1008},
+    {"trayecto": "Cruzar la ciudad Este↔Oeste", "km": 18, "dia_rd": 1200, "noche_rd": 1440},
+    {"trayecto": "Polígono → Hospital Plaza Salud", "km": 4, "dia_rd": 360, "noche_rd": 432},
+    {"trayecto": "Naco → Centro Olímpico", "km": 5, "dia_rd": 420, "noche_rd": 504}
+  ],
+  "servicios_especiales": {
+    "chofer_por_hora_reservado": {"tarifa_rd_por_hora": 800, "minimo_horas": 1},
+    "espera_dentro_servicio": {"minutos_gratis": 15, "tarifa_rd_por_hora": 500, "cobro": "hora o fracción"},
+    "recargo_5_a_10_pax_intelcia": {"aplica_solo_intelcia": true, "monto_extra_rd": "ver tarifario_intelcia"},
+    "recargo_h1_no_intelcia": {"umbral_pax": 7, "porcentaje": 10}
+  }
+}

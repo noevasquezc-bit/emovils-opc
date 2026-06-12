@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Emovils OPC · Onboarding</title>
+<style>
+  :root {
+    --primary: #0A2540;
+    --secondary: #1E5F8E;
+    --accent: #F2A900;
+    --success: #0E7C3A;
+    --warning: #C7400D;
+    --bg: #F4F6F8;
+    --text: #1A1A1A;
+    --light: #6B7280;
+    --border: #E1E1E1;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  body { background: var(--bg); color: var(--text); padding: 20px; min-height: 100vh; }
+  .container { max-width: 800px; margin: 0 auto; }
+  header { background: var(--primary); color: white; padding: 24px; border-radius: 12px 12px 0 0; }
+  header h1 { font-size: 24px; margin-bottom: 4px; }
+  header p { opacity: 0.85; font-size: 14px; }
+  .tabs { background: white; border-radius: 0; display: flex; border-bottom: 2px solid var(--border); }
+  .tab { flex: 1; padding: 16px; text-align: center; cursor: pointer; font-weight: 500; transition: all 0.2s; color: var(--light); }
+  .tab.active { color: var(--primary); border-bottom: 3px solid var(--accent); margin-bottom: -2px; }
+  .tab:hover { background: var(--bg); }
+  .content { background: white; padding: 30px; border-radius: 0 0 12px 12px; }
+  .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+  .form-row.single { grid-template-columns: 1fr; }
+  .field label { display: block; font-size: 13px; font-weight: 600; color: var(--primary); margin-bottom: 6px; }
+  .field input, .field select, .field textarea {
+    width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px;
+    font-size: 14px; transition: border-color 0.2s;
+  }
+  .field input:focus, .field select:focus, .field textarea:focus {
+    outline: none; border-color: var(--secondary);
+  }
+  .field .hint { font-size: 12px; color: var(--light); margin-top: 4px; }
+  .checkbox-group { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 6px; }
+  .checkbox-group label { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: normal; cursor: pointer; padding: 6px 10px; background: var(--bg); border-radius: 4px; }
+  .section-title { font-size: 16px; color: var(--primary); margin: 24px 0 12px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+  .actions { display: flex; gap: 12px; margin-top: 24px; }
+  button { padding: 12px 24px; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
+  button.primary { background: var(--primary); color: white; }
+  button.primary:hover { background: var(--secondary); }
+  button.secondary { background: var(--bg); color: var(--text); }
+  button.secondary:hover { background: var(--border); }
+  .message { margin: 16px 0; padding: 12px 16px; border-radius: 6px; font-size: 14px; }
+  .message.success { background: #DCFCE7; color: #15803D; border-left: 4px solid var(--success); }
+  .message.error { background: #FEE2E2; color: #991B1B; border-left: 4px solid var(--warning); }
+  .message.info { background: #DBEAFE; color: #1E40AF; border-left: 4px solid var(--secondary); }
+  .recent-list { margin-top: 30px; }
+  .recent-item {
+    background: var(--bg); padding: 12px 16px; border-radius: 6px;
+    margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;
+  }
+  .recent-item .name { font-weight: 600; }
+  .recent-item .meta { font-size: 12px; color: var(--light); }
+  @media (max-width: 600px) { .form-row { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <h1>🚖 Emovils OPC · Onboarding</h1>
+  <p>Carga conductores y vehículos directamente a Airtable</p>
+</header>
+
+<div class="tabs">
+  <div class="tab active" onclick="cambiarTab('conductor')">👤 Nuevo Conductor</div>
+  <div class="tab" onclick="cambiarTab('vehiculo')">🚐 Nuevo Vehículo</div>
+</div>
+
+<div class="content">
+
+<!-- ═══════════════════════════════════════════════ -->
+<!-- FORMULARIO CONDUCTOR -->
+<!-- ═══════════════════════════════════════════════ -->
+<div id="form-conductor">
+
+  <div class="section-title">Datos personales</div>
+  <div class="form-row">
+    <div class="field">
+      <label>Código *</label>
+      <input type="text" id="c_codigo" placeholder="C001, A001" required>
+      <div class="hint">C = propio, A = afiliado</div>
+    </div>
+    <div class="field">
+      <label>Tipo *</label>
+      <select id="c_tipo" required>
+        <option value="Propio">Propio (salario fijo)</option>
+        <option value="Afiliado">Afiliado (30% comisión)</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="form-row single">
+    <div class="field">
+      <label>Nombre completo *</label>
+      <input type="text" id="c_nombre" placeholder="Juan Pérez Rodríguez" required>
+    </div>
+  </div>
+
+  <div class="form-row">
+    <div class="field">
+      <label>Cédula *</label>
+      <input type="text" id="c_cedula" placeholder="001-1234567-8" required>
+    </div>
+    <div class="field">
+      <label>WhatsApp *</label>
+      <input type="tel" id="c_whatsapp" placeholder="+1-829-555-1234" required>
+    </div>
+  </div>
+
+  <div class="form-row">
+    <div class="field">
+      <label>Email</label>
+      <input type="email" id="c_email" placeholder="juan@gmail.com">
+    </div>
+    <div class="field">
+      <label>Fecha de nacimiento</label>
+      <input type="date" id="c_fecha_nac">
+    </div>
+  </div>
+
+  <div class="form-row single">
+    <div class="field">
+      <label>Dirección</label>
+      <input type="text" id="c_direccion" placeholder="Calle X #15, Santo Domingo Este">
+    </div>
+  </div>
+
+  <div class="section-title">Operativo</div>
+
+  <div class="field">
+    <label>Zonas base (donde trabaja)</label>
+    <div class="checkbox-group" id="c_zonas">
+      <label><input type="checkbox" value="Santo Domingo Este"> SD Este</label>
+      <label><input type="checkbox" value="Santo Domingo Norte"> SD Norte</label>
+      <label><input type="checkbox" value="Santo Domingo Oeste"> SD Oeste</label>
+      <label><input type="checkbox" value="Distrito Nacional"> Distrito Nacional</label>
+      <label><input type="checkbox" value="Villa Mella"> Villa Mella</label>
+      <label><input type="checkbox" value="Boca Chica"> Boca Chica</label>
+      <label><input type="checkbox" value="San Pedro de Macorís"> San Pedro</label>
+      <label><input type="checkbox" value="La Romana"> La Romana</label>
+      <label><input type="checkbox" value="Punta Cana"> Punta Cana</label>
+    </div>
+  </div>
+
+  <div class="field" style="margin-top: 16px;">
+    <label>Idiomas</label>
+    <div class="checkbox-group" id="c_idiomas">
+      <label><input type="checkbox" value="Español" checked> Español</label>
+      <label><input type="checkbox" value="Inglés"> Inglés</label>
+      <label><input type="checkbox" value="Francés"> Francés</label>
+      <label><input type="checkbox" value="Italiano"> Italiano</label>
+    </div>
+  </div>
+
+  <div class="field" style="margin-top: 16px;">
+    <label>Especialidad</label>
+    <div class="checkbox-group" id="c_especialidad">
+      <label><input type="checkbox" value="Aeropuerto"> Aeropuerto</label>
+      <label><input type="checkbox" value="Corporativo"> Corporativo</label>
+      <label><input type="checkbox" value="VIP"> VIP</label>
+      <label><input type="checkbox" value="Naviera"> Naviera</label>
+      <label><input type="checkbox" value="Eventos"> Eventos</label>
+      <label><input type="checkbox" value="Multi-leg"> Multi-leg</label>
+    </div>
+  </div>
+
+  <div class="section-title">Licencia</div>
+
+  <div class="form-row">
+    <div class="field">
+      <label>Categoría licencia</label>
+      <select id="c_lic_categoria">
+        <option value="">--</option>
+        <option value="Cat. 1">Cat. 1</option>
+        <option value="Cat. 2">Cat. 2</option>
+        <option value="Cat. 3">Cat. 3</option>
+        <option value="Cat. 4">Cat. 4</option>
+        <option value="Cat. 5">Cat. 5</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Vencimiento licencia</label>
+      <input type="date" id="c_lic_vencimiento">
+    </div>
+  </div>
+
+  <div id="conductor-afiliado-section" style="display:none;">
+    <div class="section-title">Datos bancarios (afiliado)</div>
+    <div class="form-row">
+      <div class="field">
+        <label>Banco</label>
+        <input type="text" id="c_banco" placeholder="Banco Popular">
+      </div>
+      <div class="field">
+        <label>Tipo de cuenta</label>
+        <select id="c_tipo_cuenta">
+          <option value="">--</option>
+          <option value="Ahorro">Ahorro</option>
+          <option value="Corriente">Corriente</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="field">
+        <label>Número de cuenta</label>
+        <input type="text" id="c_cuenta">
+      </div>
+      <div class="field">
+        <label>RNC (si aplica)</label>
+        <input type="text" id="c_rnc">
+      </div>
+    </div>
+  </div>
+
+  <div class="actions">
+    <button class="primary" onclick="enviarConductor()">Guardar Conductor</button>
+    <button class="secondary" onclick="limpiarConductor()">Limpiar</button>
+  </div>
+
+  <div id="conductor-message"></div>
+
+</div>
+
+<!-- ═══════════════════════════════════════════════ -->
+<!-- FORMULARIO VEHÍCULO -->
+<!-- ═══════════════════════════════════════════════ -->
+<div id="form-vehiculo" style="display:none;">
+
+  <div class="section-title">Identificación</div>
+  <div class="form-row">
+    <div class="field">
+      <label>Placa *</label>
+      <input type="text" id="v_placa" placeholder="A123456" required style="text-transform: uppercase;">
+    </div>
+    <div class="field">
+      <label>Tipo *</label>
+      <select id="v_tipo" required>
+        <option value="Caravan">Van Caravan</option>
+        <option value="H1">Hyundai H1</option>
+        <option value="Otro">Otro</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="form-row">
+    <div class="field">
+      <label>Marca *</label>
+      <input type="text" id="v_marca" placeholder="Hyundai" required>
+    </div>
+    <div class="field">
+      <label>Modelo</label>
+      <input type="text" id="v_modelo" placeholder="H1 Tour">
+    </div>
+  </div>
+
+  <div class="form-row">
+    <div class="field">
+      <label>Año *</label>
+      <input type="number" id="v_año" placeholder="2022" min="2000" max="2030" required>
+    </div>
+    <div class="field">
+      <label>Color</label>
+      <input type="text" id="v_color" placeholder="Blanco">
+    </div>
+  </div>
+
+  <div class="form-row">
+    <div class="field">
+      <label>Capacidad pasajeros *</label>
+      <input type="number" id="v_capacidad" placeholder="10" min="1" max="20" required>
+    </div>
+    <div class="field">
+      <label>Chasis (VIN)</label>
+      <input type="text" id="v_vin" placeholder="KMHRC81GFAU123456">
+    </div>
+  </div>
+
+  <div class="section-title">Propietario</div>
+  <div class="form-row">
+    <div class="field">
+      <label>Tipo propietario *</label>
+      <select id="v_propietario_tipo" required>
+        <option value="Emovils_Propio">Emovils (vehículo propio)</option>
+        <option value="Afiliado">Conductor afiliado</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Km actual</label>
+      <input type="number" id="v_km" placeholder="0">
+    </div>
+  </div>
+
+  <div class="section-title">Documentos</div>
+
+  <div class="form-row">
+    <div class="field">
+      <label>Marbete · vencimiento</label>
+      <input type="date" id="v_marbete_venc">
+    </div>
+    <div class="field">
+      <label>Seguro · vencimiento</label>
+      <input type="date" id="v_seguro_venc">
+    </div>
+  </div>
+
+  <div class="form-row">
+    <div class="field">
+      <label>Revisión técnica · vencimiento</label>
+      <input type="date" id="v_revision_venc">
+    </div>
+    <div class="field">
+      <label>Estado</label>
+      <select id="v_estado">
+        <option value="ACTIVO">Activo</option>
+        <option value="MANTENIMIENTO">Mantenimiento</option>
+        <option value="INACTIVO">Inactivo</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="form-row single">
+    <div class="field">
+      <label>Notas</label>
+      <textarea id="v_notas" rows="2" placeholder="Cualquier observación adicional"></textarea>
+    </div>
+  </div>
+
+  <div class="actions">
+    <button class="primary" onclick="enviarVehiculo()">Guardar Vehículo</button>
+    <button class="secondary" onclick="limpiarVehiculo()">Limpiar</button>
+  </div>
+
+  <div id="vehiculo-message"></div>
+
+</div>
+
+</div>
+
+</div>
+
+<script>
+const API_BASE = "http://localhost:5002";
+
+function cambiarTab(tipo) {
+  document.querySelectorAll('.tab').forEach((t, i) => {
+    t.classList.toggle('active', (tipo === 'conductor' && i === 0) || (tipo === 'vehiculo' && i === 1));
+  });
+  document.getElementById('form-conductor').style.display = tipo === 'conductor' ? 'block' : 'none';
+  document.getElementById('form-vehiculo').style.display = tipo === 'vehiculo' ? 'block' : 'none';
+}
+
+// Mostrar/ocultar sección bancaria según tipo de conductor
+document.getElementById('c_tipo').addEventListener('change', e => {
+  document.getElementById('conductor-afiliado-section').style.display =
+    e.target.value === 'Afiliado' ? 'block' : 'none';
+});
+
+function recolectarCheckboxes(containerId) {
+  return Array.from(
+    document.querySelectorAll(`#${containerId} input[type=checkbox]:checked`)
+  ).map(c => c.value);
+}
+
+function mostrarMensaje(divId, texto, tipo) {
+  const div = document.getElementById(divId);
+  div.innerHTML = `<div class="message ${tipo}">${texto}</div>`;
+  if (tipo === 'success') {
+    setTimeout(() => { div.innerHTML = ''; }, 5000);
+  }
+}
+
+async function enviarConductor() {
+  const codigo = document.getElementById('c_codigo').value.trim();
+  const nombre = document.getElementById('c_nombre').value.trim();
+  const cedula = document.getElementById('c_cedula').value.trim();
+  const whatsapp = document.getElementById('c_whatsapp').value.trim();
+
+  if (!codigo || !nombre || !cedula || !whatsapp) {
+    mostrarMensaje('conductor-message', '⚠️ Faltan campos obligatorios (código, nombre, cédula, WhatsApp).', 'error');
+    return;
+  }
+
+  const tipo = document.getElementById('c_tipo').value;
+  const datos = {
+    Codigo: codigo,
+    Nombre_completo: nombre,
+    Tipo: tipo,
+    Cedula: cedula,
+    WhatsApp: whatsapp,
+    Email: document.getElementById('c_email').value.trim() || undefined,
+    Direccion: document.getElementById('c_direccion').value.trim() || undefined,
+    Fecha_nacimiento: document.getElementById('c_fecha_nac').value || undefined,
+    Zona_base: recolectarCheckboxes('c_zonas'),
+    Idiomas: recolectarCheckboxes('c_idiomas'),
+    Especialidad: recolectarCheckboxes('c_especialidad'),
+    Licencia_conducir_categoria: document.getElementById('c_lic_categoria').value || undefined,
+    Licencia_vencimiento: document.getElementById('c_lic_vencimiento').value || undefined,
+    Estado_actual: 'OFFLINE',
+    Comision_pct: tipo === 'Afiliado' ? 30 : 0,
+    Activo: true,
+  };
+
+  if (tipo === 'Afiliado') {
+    datos.Banco = document.getElementById('c_banco').value.trim() || undefined;
+    datos.Tipo_cuenta = document.getElementById('c_tipo_cuenta').value || undefined;
+    datos.Cuenta_bancaria = document.getElementById('c_cuenta').value.trim() || undefined;
+    datos.RNC = document.getElementById('c_rnc').value.trim() || undefined;
+  }
+
+  Object.keys(datos).forEach(k => datos[k] === undefined && delete datos[k]);
+
+  try {
+    mostrarMensaje('conductor-message', '⏳ Guardando...', 'info');
+    const r = await fetch(`${API_BASE}/api/v2/conductor/crear`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(datos),
+    });
+    const result = await r.json();
+    if (r.ok) {
+      mostrarMensaje('conductor-message',
+        `✅ Conductor <b>${nombre}</b> guardado correctamente en Airtable.<br>
+         ID: ${result.id || 'creado'}`, 'success');
+      limpiarConductor();
+    } else {
+      mostrarMensaje('conductor-message', `❌ Error: ${result.error || 'desconocido'}`, 'error');
+    }
+  } catch (e) {
+    mostrarMensaje('conductor-message', `❌ Error de conexión: ${e.message}`, 'error');
+  }
+}
+
+async function enviarVehiculo() {
+  const placa = document.getElementById('v_placa').value.trim().toUpperCase();
+  const tipo = document.getElementById('v_tipo').value;
+  const marca = document.getElementById('v_marca').value.trim();
+  const año = parseInt(document.getElementById('v_año').value);
+  const capacidad = parseInt(document.getElementById('v_capacidad').value);
+
+  if (!placa || !tipo || !marca || !año || !capacidad) {
+    mostrarMensaje('vehiculo-message', '⚠️ Faltan campos obligatorios.', 'error');
+    return;
+  }
+
+  const datos = {
+    Placa: placa,
+    Tipo: tipo,
+    Marca: marca,
+    Modelo: document.getElementById('v_modelo').value.trim() || undefined,
+    Año: año,
+    Color: document.getElementById('v_color').value.trim() || undefined,
+    Capacidad_pasajeros: capacidad,
+    Propietario_tipo: document.getElementById('v_propietario_tipo').value,
+    Chasis_VIN: document.getElementById('v_vin').value.trim() || undefined,
+    Km_actual: parseInt(document.getElementById('v_km').value) || 0,
+    Marbete_vencimiento: document.getElementById('v_marbete_venc').value || undefined,
+    Seguro_vencimiento: document.getElementById('v_seguro_venc').value || undefined,
+    Revision_tecnica_vencimiento: document.getElementById('v_revision_venc').value || undefined,
+    Estado: document.getElementById('v_estado').value,
+    Notas: document.getElementById('v_notas').value.trim() || undefined,
+  };
+
+  Object.keys(datos).forEach(k => datos[k] === undefined && delete datos[k]);
+
+  try {
+    mostrarMensaje('vehiculo-message', '⏳ Guardando...', 'info');
+    const r = await fetch(`${API_BASE}/api/v2/vehiculo/crear`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(datos),
+    });
+    const result = await r.json();
+    if (r.ok) {
+      mostrarMensaje('vehiculo-message',
+        `✅ Vehículo <b>${placa}</b> guardado correctamente en Airtable.<br>
+         ID: ${result.id || 'creado'}`, 'success');
+      limpiarVehiculo();
+    } else {
+      mostrarMensaje('vehiculo-message', `❌ Error: ${result.error || 'desconocido'}`, 'error');
+    }
+  } catch (e) {
+    mostrarMensaje('vehiculo-message', `❌ Error de conexión: ${e.message}`, 'error');
+  }
+}
+
+function limpiarConductor() {
+  ['c_codigo', 'c_nombre', 'c_cedula', 'c_whatsapp', 'c_email', 'c_direccion',
+   'c_fecha_nac', 'c_lic_vencimiento', 'c_banco', 'c_cuenta', 'c_rnc'].forEach(id => {
+    document.getElementById(id).value = '';
+  });
+  document.querySelectorAll('#form-conductor input[type=checkbox]').forEach(c => c.checked = false);
+  document.querySelectorAll('#c_idiomas input[value="Español"]').forEach(c => c.checked = true);
+}
+
+function limpiarVehiculo() {
+  ['v_placa', 'v_marca', 'v_modelo', 'v_año', 'v_color', 'v_capacidad', 'v_vin',
+   'v_km', 'v_marbete_venc', 'v_seguro_venc', 'v_revision_venc', 'v_notas'].forEach(id => {
+    document.getElementById(id).value = '';
+  });
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,62 @@
+{
+  "descripcion": "6 plantillas de email outreach B2B Emovils. Listas para subir a MailerLite cuando la cuenta se reactive, o exportar a otro servicio (Resend, Smartlead, Gmail).",
+  "estado_mailerlite": "Cuenta cerrada/cancelada al 2026-06-11. Grupos creados pero no se pueden enviar campañas hasta reactivar.",
+  "remitente_sugerido": {
+    "nombre": "Noe Vásquez · Emovils",
+    "email": "hola@emovils.com",
+    "reply_to": "hola@emovils.com",
+    "nota": "El email debe estar verificado en el servicio que use. Configurar DKIM/SPF para emovils.com."
+  },
+  "plantillas": {
+    "Call_Center": {
+      "grupo_id_mailerlite": "190022230648817193",
+      "asunto": "Reducir 30% el costo de transporte nocturno de su staff (RD)",
+      "vista_previa_movil": "60 chars (algo largo para móvil)",
+      "cuerpo": "Buenos días equipo de [EMPRESA],\n\nSoy Noe Vásquez, dueño de Emovils — transporte ejecutivo en RD con 14 años operando para call centers locales (incluyendo Intelcia).\n\nVi que [EMPRESA] tiene operación nocturna en Santo Domingo. Quería compartirles cómo estamos ayudando a empresas como la suya a:\n\n  ✅ Reducir 30% el costo total de transporte de empleados nocturnos\n  ✅ 99.5% de cumplimiento puntual en los últimos 12 meses\n  ✅ Reporte automático del cumplimiento cada mañana\n  ✅ Flota de 28 vans Caravan + H1 con choferes verificados\n\n¿Tendrían 15 minutos esta semana para una conversación? Les comparto un caso real de un call center con 50+ empleadas nocturnas que está ahorrando RD$120,000/mes.\n\nSi prefieren, también podemos arrancar con una semana piloto sin compromiso.\n\nSaludos,\nNoe Vásquez\nEmovils · WhatsApp 829-861-0090\n🔗 emovils.com",
+      "prospectos_target": 10
+    },
+    "Hotel": {
+      "grupo_id_mailerlite": "190023475585352816",
+      "asunto": "Sus huéspedes VIP merecen llegar al resort sin estrés ✈️",
+      "vista_previa_movil": "53 chars",
+      "cuerpo": "Estimado equipo de [EMPRESA],\n\nSoy Noe Vásquez de Emovils — transporte ejecutivo en RD con 14 años atendiendo huéspedes premium de hoteles 5 estrellas en la región.\n\nQuería ofrecerles nuestro servicio de transfers ejecutivos AILA → [HOTEL]:\n\n  ✅ Vans Caravan & H1 con chofer profesional uniformado\n  ✅ Tracking de vuelo en tiempo real (esperamos retrasos sin costo)\n  ✅ Tarifa cerrada negociada para su hotel\n  ✅ Facturación NCF · Reportes mensuales\n  ✅ Servicio 24/7 con WhatsApp directo al supervisor\n\nOfrecemos comisión 10-15% sobre cada transfer reservado por su concierge.\n\n¿Podemos coordinar 20 minutos esta semana para presentarles nuestra propuesta?\n\nSaludos cordiales,\nNoe Vásquez\nEmovils · 829-861-0090 · emovils.com",
+      "prospectos_target": 17
+    },
+    "Naviera": {
+      "grupo_id_mailerlite": "190023500602279383",
+      "asunto": "Logística de tripulación AILA ↔ puerto · 14 años en RD",
+      "vista_previa_movil": "54 chars",
+      "cuerpo": "Estimado equipo de [EMPRESA],\n\nSoy Noe Vásquez de Emovils. Llevamos 14 años manejando logística de transporte de tripulación (ENROLO/DESENROLO) para líneas navieras con escala en La Romana, San Pedro de Macorís y Casa de Campo.\n\nSi están buscando un operador local confiable para sus necesidades de transfer de crew, ofrecemos:\n\n  ✅ Coordinación nocturna 24/7 con su superintendente\n  ✅ Vans Caravan & H1 con capacidad para grupos\n  ✅ Tarifa por servicio o contrato mensual cerrado\n  ✅ Reportes con QR de verificación por crew member\n\nAtendemos actualmente a varias líneas con servicio en estos puertos.\n\n¿Conversamos por WhatsApp 829-861-0090 o por email?\n\nSaludos,\nNoe Vásquez\nEmovils RD · emovils.com",
+      "prospectos_target": 7
+    },
+    "Corporativo_Otro": {
+      "grupo_id_mailerlite": "190023530287466404",
+      "asunto": "Transporte ejecutivo confiable para su equipo (14 años RD)",
+      "vista_previa_movil": "58 chars",
+      "cuerpo": "Buenos días [EMPRESA],\n\nSoy Noe Vásquez de Emovils — transporte ejecutivo en RD con 14 años de operación.\n\nSi su equipo necesita servicios recurrentes de transporte (aeropuerto, reuniones, eventos, traslados nocturnos), podemos ofrecerles:\n\n  ✅ Cuenta corporativa con facturación NCF mensual\n  ✅ Tarifas preferenciales por volumen\n  ✅ Vans ejecutivas con chofer profesional\n  ✅ Servicio 24/7 vía WhatsApp\n\n¿Podríamos agendar 15 minutos esta semana?\n\nSaludos,\nNoe Vásquez · Emovils\n829-861-0090 · emovils.com",
+      "prospectos_target": 5
+    },
+    "Embajada": {
+      "grupo_id_mailerlite": "190023548705703871",
+      "asunto": "Transporte VIP para personal diplomático en RD",
+      "vista_previa_movil": "46 chars · óptimo",
+      "cuerpo": "Distinguido equipo de [EMPRESA],\n\nSoy Noe Vásquez, dueño de Emovils — transporte ejecutivo con 14 años de experiencia en RD.\n\nOfrecemos servicios de transporte VIP para personal diplomático con:\n\n  ✅ Discreción y profesionalismo total\n  ✅ Choferes con antecedentes verificados\n  ✅ Vans Caravan & H1 ejecutivas\n  ✅ Tarifa cerrada o contrato mensual\n  ✅ Facturación NCF\n\nEstamos disponibles para presentar nuestra propuesta cuando deseen.\n\nSaludos cordiales,\nNoe Vásquez · Emovils RD\n829-861-0090 · emovils.com",
+      "prospectos_target": 8
+    },
+    "Agencia_Viajes": {
+      "grupo_id_mailerlite": "190023602890868381",
+      "asunto": "Comisión 15% por cada transfer reservado · Emovils",
+      "vista_previa_movil": "50 chars · óptimo",
+      "cuerpo": "Hola equipo de [EMPRESA],\n\nSoy Noe Vásquez de Emovils. Llevamos 14 años en RD ofreciendo transfers ejecutivos premium.\n\nQueremos ofrecerles convenio de receptivo con:\n\n  ✅ Comisión 15% por cada transfer reservado\n  ✅ Tarifa preferencial confidencial\n  ✅ Vans Caravan & H1 con servicio premium\n  ✅ Reservas vía WhatsApp con confirmación instantánea\n  ✅ Tracking en tiempo real para sus clientes\n\n¿Conversamos esta semana? 15 minutos.\n\nSaludos,\nNoe Vásquez · Emovils\n829-861-0090 · emovils.com",
+      "prospectos_target": 7
+    }
+  },
+  "total_prospectos_listos": 54,
+  "alternativas_envio": [
+    "Resend (API directa, $20/mes para 50K emails) — recomendado para B2B cold",
+    "Smartlead ($97/mes, optimizado para outreach con warmup)",
+    "Instantly ($97/mes, similar a Smartlead)",
+    "Gmail (manual, máximo 500/día con dominio propio)",
+    "Reactivar MailerLite (la cuenta actual está cerrada)"
+  ]
+}
