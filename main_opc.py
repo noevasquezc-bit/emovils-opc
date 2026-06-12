@@ -175,6 +175,7 @@ def reservar():
 # ═══════════════════════════════════════════════════════════════
 
 @app.route("/api/v2/whatsapp/webhook", methods=["GET", "POST"])
+@app.route("/webhook/whatsapp", methods=["GET", "POST"])  # alias para compatibilidad con webhook viejo de Green API
 def whatsapp_webhook():
     """Recibe mensajes de WhatsApp via Green API y responde via Monserrat."""
     if request.method == "GET":
