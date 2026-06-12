@@ -23,18 +23,9 @@ def _url(method: str) -> str:
 # GUIONES DE WHATSAPP — Emovils Airport
 # ─────────────────────────────────────────────
 SCRIPTS = {
-    "bienvenida_cotizacion": """Hola, gracias por contactar a Emovils. 🚗
+    "bienvenida_cotizacion": """¡Hola! Bienvenido a Emovils 🚗
 
-Con gusto le cotizamos su traslado. Para darle precio exacto, por favor envíenos:
-1. Fecha de llegada/salida
-2. Hora estimada
-3. Aerolínea y número de vuelo
-4. Destino final
-5. Cantidad de pasajeros
-6. Cantidad aproximada de maletas
-7. Si desea solo ida o ida y vuelta
-
-Nuestro servicio es privado, formal, con precio confirmado antes de su llegada.""",
+Hacemos traslados ejecutivos en todo el país — aeropuerto, ciudad, médicos, interprovinciales. Dígame, ¿para dónde necesita ir y cuándo?""",
 
     "seguimiento_no_responde": """Hola, le escribo para confirmar si aún desea reservar su traslado desde el aeropuerto.
 
@@ -179,20 +170,41 @@ def parse_webhook_event(payload: dict) -> Optional[dict]:
         body = payload.get("body", payload)
         type_webhook = body.get("typeWebhook", "")
 
+        logger.info(f"Webhook recibido: typeWebhook={type_webhook}")
+
         if type_webhook != "incomingMessageReceived":
             return None
 
         message_data = body.get("messageData", {})
         sender_data = body.get("senderData", {})
-        text_data = message_data.get("textMessageData", {})
 
         from_number = sender_data.get("sender", "").replace("@c.us", "")
         contact_name = sender_data.get("senderName", "")
-        text = text_data.get("textMessage", "")
         message_id = body.get("idMessage", "")
         timestamp = body.get("timestamp", 0)
+        type_message = message_data.get("typeMessage", "")
 
-        if not from_number or not text:
+        logger.info(f"typeMessage={type_message} de {from_number[:6] if from_number else 'unknown'}***")
+
+        if not from_number:
+            return None
+
+        # Nota de voz: Green API usa typeMessage "audioMessage" o "pttMessage"
+        if type_message in ("audioMessage", "pttMessage"):
+            return {
+                "from": from_number,
+                "type": "audio",
+                "text": "[nota de voz]",
+                "timestamp": timestamp,
+                "message_id": message_id,
+                "contact_name": contact_name
+            }
+
+        # Texto normal
+        text_data = message_data.get("textMessageData", {})
+        text = text_data.get("textMessage", "")
+
+        if not text:
             return None
 
         return {

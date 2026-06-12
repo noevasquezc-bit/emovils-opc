@@ -1,0 +1,383 @@
+"""
+Emovils — Servidor Principal (Flask)
+"""
+import logging
+import os
+import qrcode
+import io
+import base64
+from flask import Flask, request, jsonify, make_response
+from flask_cors import CORS
+from dotenv import load_dotenv
+
+load_dotenv()
+
+from agents.agent_vendedor_whatsapp import process_incoming_message, send_quotation
+from agents.agent_analytics import generate_daily_report, pilot_health_check
+from agents.agent_director_comercial import get_weekly_strategy
+from agents.agent_contenido import create_instagram_post, create_7day_content_calendar
+from lib.paypal_api import handle_webhook, capture_payment
+from config.safeguards import CPAEvaluator
+from lib.airtable_api import get_pilot_totals
+from lib.database import (
+    crear_reserva, obtener_reserva, actualizar_reserva,
+    asignar_conductor, confirmar_abordaje,
+    registrar_vehiculo, obtener_vehiculo,
+    obtener_reserva_activa_de_vehiculo, RESERVAS, VEHICULOS
+)
+from lib.html_pages import (
+    pagina_reserva_cliente, pagina_verificacion_vehiculo, pagina_conductor_scan
+)
+from lib.whatsapp_api import send_text
+
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s — %(name)s — %(levelname)s — %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+app = Flask(__name__)
+CORS(app)
+
+BASE_URL = os.getenv("BASE_URL", "https://emovils-opc-production.up.railway.app")
+
+
+def _generar_qr_b64(url: str) -> str:
+    """Genera un QR como base64 PNG para embeber en HTML."""
+    try:
+        qr = qrcode.QRCode(version=1, box_size=8, border=2)
+        qr.add_data(url)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="#1a1a2e", back_color="white")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode()
+    except Exception as e:
+        logger.warning("Error generando QR: %s", e)
+        return ""
+
+
+def _html(contenido: str) -> object:
+    resp = make_response(contenido)
+    resp.headers["Content-Type"] = "text/html; charset=utf-8"
+    return resp
+
+
+# ─────────────────────────────────────────────
+# HEALTH CHECK
+# ─────────────────────────────────────────────
+@app.route("/", methods=["GET"])
+def root():
+    return jsonify({
+        "system": "Emovils Traslados Ejecutivos",
+        "status": "online",
+        "reservas_activas": len(RESERVAS),
+        "vehiculos_registrados": len(VEHICULOS),
+    })
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok"})
+
+
+# ─────────────────────────────────────────────
+# WHATSAPP WEBHOOK
+# ─────────────────────────────────────────────
+@app.route("/webhook/whatsapp", methods=["GET", "POST"])
+def whatsapp_webhook():
+    if request.method == "GET":
+        return jsonify({"status": "webhook activo"})
+    try:
+        payload = request.get_json(force=True) or {}
+        result = process_incoming_message(payload)
+        return jsonify(result)
+    except Exception as e:
+        logger.error("Error en webhook WhatsApp: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/webhook/paypal", methods=["POST"])
+def paypal_webhook():
+    try:
+        payload = request.get_json(force=True) or {}
+        result = handle_webhook(payload)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ─────────────────────────────────────────────
+# RESERVAS — API
+# ─────────────────────────────────────────────
+@app.route("/reserva/crear", methods=["POST"])
+def api_crear_reserva():
+    """Crea una reserva y retorna el booking_id + link QR del cliente."""
+    datos = request.get_json() or {}
+    campos_req = ["nombre", "telefono", "origen", "destino", "fecha", "hora",
+                  "pasajeros", "precio", "forma_pago"]
+    faltantes = [c for c in campos_req if not datos.get(c)]
+    if faltantes:
+        return jsonify({"error": "Datos faltantes", "faltantes": faltantes}), 400
+
+    reserva = crear_reserva(datos)
+    bid = reserva["booking_id"]
+    token = reserva["token_cliente"]
+
+    link_cliente = f"{BASE_URL}/b/{bid}?t={token}"
+    link_conductor = f"{BASE_URL}/driver/scan/{bid}?t={token}"
+
+    # Notificar por WhatsApp si hay numero
+    wa = datos.get("whatsapp") or datos.get("telefono")
+    if wa:
+        msg = (
+            f"Su reserva ha sido confirmada.\n\n"
+            f"Reserva: {bid}\n"
+            f"Fecha: {reserva['fecha']} | Hora: {reserva['hora']}\n"
+            f"De: {reserva['origen']}\n"
+            f"A: {reserva['destino']}\n"
+            f"Precio: RD${reserva['precio_rd']:,}\n\n"
+            f"Su QR de embarque y detalles del conductor:\n{link_cliente}\n\n"
+            f"Cuando llegue el vehiculo, escanee el QR en la puerta. "
+            f"Pantalla verde = conductor correcto. Roja = NO aborde."
+        )
+        try:
+            send_text(wa, msg)
+        except Exception as e:
+            logger.warning("Error enviando WA: %s", e)
+
+    return jsonify({
+        "booking_id": bid,
+        "estado": reserva["estado"],
+        "link_cliente": link_cliente,
+        "link_conductor": link_conductor,
+        "mensaje": "Reserva creada. Link enviado al cliente por WhatsApp."
+    })
+
+
+@app.route("/reserva/<booking_id>", methods=["GET"])
+def api_obtener_reserva(booking_id):
+    r = obtener_reserva(booking_id)
+    if not r:
+        return jsonify({"error": "Reserva no encontrada"}), 404
+    return jsonify(r)
+
+
+@app.route("/reserva/<booking_id>/asignar-conductor", methods=["POST"])
+def api_asignar_conductor(booking_id):
+    """Admin asigna conductor y vehiculo a una reserva."""
+    datos = request.get_json() or {}
+    conductor = datos.get("conductor", {})
+    vehiculo = datos.get("vehiculo", {})
+    if not conductor or not vehiculo:
+        return jsonify({"error": "Se requiere conductor y vehiculo"}), 400
+
+    reserva = asignar_conductor(booking_id, conductor, vehiculo)
+    if not reserva:
+        return jsonify({"error": "Reserva no encontrada"}), 404
+
+    # Notificar al cliente por WhatsApp
+    wa = reserva.get("cliente_whatsapp") or reserva.get("cliente_telefono")
+    if wa:
+        bid = reserva["booking_id"]
+        token = reserva["token_cliente"]
+        link = f"{BASE_URL}/b/{bid}?t={token}"
+        msg = (
+            f"Su conductor ha sido asignado.\n\n"
+            f"Conductor: {conductor.get('nombre')}\n"
+            f"Vehiculo: {vehiculo.get('color')} {vehiculo.get('modelo')}\n"
+            f"Placa: {vehiculo.get('placa')}\n\n"
+            f"Ver detalles y QR de embarque:\n{link}\n\n"
+            f"Al llegar el vehiculo, escanee el QR en la puerta para verificar."
+        )
+        try:
+            send_text(wa, msg)
+        except Exception as e:
+            logger.warning("Error enviando WA: %s", e)
+
+    return jsonify({"ok": True, "reserva": reserva})
+
+
+# ─────────────────────────────────────────────
+# PAGINA DEL CLIENTE — QR de embarque
+# ─────────────────────────────────────────────
+@app.route("/b/<booking_id>", methods=["GET"])
+def pagina_cliente(booking_id):
+    """
+    El cliente abre esta pagina desde WhatsApp.
+    Ve su reserva + QR de embarque (el conductor escanea esto).
+    """
+    token = request.args.get("t", "")
+    reserva = obtener_reserva(booking_id)
+
+    if not reserva:
+        return _html("<h2 style='padding:40px;font-family:sans-serif'>Reserva no encontrada</h2>")
+
+    if reserva.get("token_cliente") != token:
+        return _html("<h2 style='padding:40px;font-family:sans-serif'>Enlace inválido</h2>"), 403
+
+    # Generar QR que el conductor va a escanear
+    scan_url = f"{BASE_URL}/driver/scan/{booking_id}?t={token}"
+    qr_b64 = _generar_qr_b64(scan_url)
+
+    html = pagina_reserva_cliente(reserva, BASE_URL, qr_b64)
+    return _html(html)
+
+
+# ─────────────────────────────────────────────
+# QR DEL VEHICULO — Cliente escanea la puerta
+# ─────────────────────────────────────────────
+@app.route("/v/<vehicle_id>", methods=["GET"])
+def verificar_vehiculo(vehicle_id):
+    """
+    El cliente escanea el QR pegado en la puerta del vehiculo.
+    Muestra VERDE si es el conductor asignado, ROJO si no.
+    """
+    booking_id = request.args.get("b", "")
+
+    vehiculo = obtener_vehiculo(vehicle_id)
+    if not vehiculo:
+        return _html(pagina_verificacion_vehiculo("rojo"))
+
+    # Buscar reserva activa asignada a este vehiculo
+    reserva_activa = obtener_reserva_activa_de_vehiculo(vehicle_id)
+
+    if not reserva_activa:
+        # No hay reserva activa — vehiculo no asignado ahora
+        return _html(pagina_verificacion_vehiculo("amarillo"))
+
+    # Si el cliente vino con un booking_id, verificar que coincide
+    if booking_id and reserva_activa.get("booking_id") != booking_id:
+        return _html(pagina_verificacion_vehiculo("rojo"))
+
+    # Todo OK — mostrar pantalla verde con datos del conductor
+    return _html(pagina_verificacion_vehiculo("verde", reserva=reserva_activa, vehiculo=vehiculo))
+
+
+# ─────────────────────────────────────────────
+# CONDUCTOR — Escanea QR del cliente
+# ─────────────────────────────────────────────
+@app.route("/driver/scan/<booking_id>", methods=["GET"])
+def conductor_scan(booking_id):
+    """
+    El conductor escanea el QR del cliente.
+    Muestra los datos del pasajero y boton para confirmar abordaje.
+    """
+    token = request.args.get("t", "")
+    reserva = obtener_reserva(booking_id)
+
+    if not reserva:
+        return _html(pagina_conductor_scan(None, "no_encontrado"))
+
+    if reserva.get("token_cliente") != token:
+        return _html(pagina_conductor_scan(None, "no_encontrado"))
+
+    if reserva.get("qr_cliente_usado"):
+        return _html(pagina_conductor_scan(reserva, "ya_usado"))
+
+    return _html(pagina_conductor_scan(reserva, "ok"))
+
+
+@app.route("/driver/confirmar-abordaje", methods=["POST"])
+def conductor_confirmar_abordaje():
+    """El conductor confirma que el pasajero abordó."""
+    booking_id = request.form.get("booking_id") or (request.get_json() or {}).get("booking_id")
+    driver_id = request.form.get("driver_id") or (request.get_json() or {}).get("driver_id", "conductor")
+
+    if not booking_id:
+        return jsonify({"error": "booking_id requerido"}), 400
+
+    resultado = confirmar_abordaje(booking_id, driver_id)
+    if resultado.get("ok"):
+        reserva = resultado["reserva"]
+        # Notificar al cliente
+        wa = reserva.get("cliente_whatsapp") or reserva.get("cliente_telefono")
+        if wa:
+            try:
+                send_text(wa, f"Su conductor ha confirmado su abordaje. Buen viaje, {reserva.get('cliente_nombre','')}")
+            except Exception:
+                pass
+        return _html(f"""<!DOCTYPE html><html lang="es"><head>
+            <meta name="viewport" content="width=device-width,initial-scale=1">
+            <style>body{{font-family:sans-serif;text-align:center;padding:60px 20px;background:#f0fdf4}}
+            h1{{color:#16a34a;font-size:28px}} p{{color:#166534;margin-top:12px}}</style>
+            </head><body>
+            <div style="font-size:80px">✅</div>
+            <h1>Abordaje Confirmado</h1>
+            <p>{reserva.get('cliente_nombre','')} — Reserva {booking_id}</p>
+            <p style="margin-top:24px;color:#64748b;font-size:14px">El cliente fue notificado por WhatsApp</p>
+            </body></html>""")
+    else:
+        return jsonify(resultado), 400
+
+
+# ─────────────────────────────────────────────
+# VEHICULOS — Registro y QR
+# ─────────────────────────────────────────────
+@app.route("/vehiculo/registrar", methods=["POST"])
+def api_registrar_vehiculo():
+    """Registra un vehiculo y genera su QR permanente."""
+    datos = request.get_json() or {}
+    if not datos.get("placa"):
+        return jsonify({"error": "placa requerida"}), 400
+
+    vehiculo = registrar_vehiculo(datos)
+    vid = vehiculo["vehicle_id"]
+    qr_url = f"{BASE_URL}/v/{vid}"
+    qr_b64 = _generar_qr_b64(qr_url)
+
+    return jsonify({
+        "vehicle_id": vid,
+        "placa": vehiculo["placa"],
+        "qr_url": qr_url,
+        "qr_png_base64": qr_b64,
+        "instruccion": f"Imprima este QR y pegue en la puerta del vehiculo {vehiculo['placa']}",
+    })
+
+
+@app.route("/vehiculo/<vehicle_id>", methods=["GET"])
+def api_vehiculo(vehicle_id):
+    v = obtener_vehiculo(vehicle_id)
+    if not v:
+        return jsonify({"error": "Vehiculo no encontrado"}), 404
+    return jsonify(v)
+
+
+# ─────────────────────────────────────────────
+# ANALYTICS Y AGENTES (mantener compatibilidad)
+# ─────────────────────────────────────────────
+@app.route("/analytics/pilot-totals", methods=["GET"])
+def get_totals():
+    try:
+        totals = get_pilot_totals()
+        return jsonify(totals)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/agent/contenido/post", methods=["POST"])
+def agent_contenido():
+    try:
+        data = request.get_json() or {}
+        result = create_instagram_post(data.get("topic", "traslados ejecutivos"))
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/agent/director/strategy", methods=["GET"])
+def agent_director():
+    try:
+        result = get_weekly_strategy()
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ─────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 5000))
+    logger.info("Emovils servidor iniciado en puerto %d", port)
+    app.run(host="0.0.0.0", port=port, debug=False)

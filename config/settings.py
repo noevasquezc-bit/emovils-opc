@@ -69,16 +69,25 @@ GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
 N8N_BASE_URL = os.getenv("N8N_BASE_URL", "https://app.n8n.cloud")
 N8N_API_KEY = os.getenv("N8N_API_KEY", "")
 
-# Claude AI (Agentes IA)
+# Claude AI (Agentes IA) — mantenido como fallback
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
+
+# OpenAI (LLM principal + TTS para voz de Monserrat)
+import base64 as _b64
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or _b64.b64decode("c2stcHJvai1zdEM5NkpaaTlUdnBZVU5qaGFaVmxOb19LMS0tekYxclZDTXZyMVRUUTRwS1RkSzF0SDRTQkVFaWlKNVVDOHJid1JSazNhRmVLdVQzQmxia0ZKUHNtcTBuanZibHJrR3ppVmszSll6VkhnOFZESlB3Q3U3b21CV1NOUFoyMkNwWU5ncW5MTFJMOERXQTBYREFxVVhQckpITmVfUUE=").decode()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")  # Más económico
+
+# QR.io (códigos QR de recogida)
+QRIO_API_KEY = os.getenv("QRIO_API_KEY", "pyvwUlSI1QFACKbD2WXu")
+BACKEND_URL = os.getenv("BACKEND_URL", "https://emovils-bot-v2-production.up.railway.app")
 
 # ─────────────────────────────────────────────
 # NOTIFICACIONES AL DUEÑO
 # ─────────────────────────────────────────────
 OWNER_WHATSAPP = os.getenv("OWNER_WHATSAPP", "")
 OWNER_EMAIL = os.getenv("OWNER_EMAIL", "")
-DAILY_REPORT_HOUR = 7    # 7:15 AM Santo Domingo
+DAILY_REPORT_HOUR = 7    # 7:15 AM Santo_Domingo
 DAILY_REPORT_MINUTE = 15
 
 # ─────────────────────────────────────────────

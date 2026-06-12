@@ -3,6 +3,10 @@
 
 # IA / Agentes
 anthropic>=0.25.0
+openai>=1.0.0
+
+# TTS — voz de Monserrat (Google TTS, gratis)
+gTTS>=2.5.0
 
 # APIs externas
 requests>=2.31.0
@@ -15,6 +19,11 @@ python-dotenv>=1.0.0
 # Servidor web (para webhooks)
 flask>=3.0.0
 flask-cors>=4.0.0
+gunicorn>=21.2.0
+
+# QR codes
+qrcode[pil]>=7.4.2
+Pillow>=10.0.0
 
 # Utilidades
 python-dateutil>=2.8.2

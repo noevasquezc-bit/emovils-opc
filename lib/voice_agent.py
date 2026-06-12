@@ -1,0 +1,68 @@
+"""
+Emovils OPC — Voice Agent (Monserrat)
+Convierte respuestas de texto a audio MP3 via gTTS (Google TTS, gratis).
+Envía el audio como mensaje de voz por WhatsApp (Green API).
+"""
+import os
+import io
+import logging
+import requests
+from gtts import gTTS
+
+logger = logging.getLogger(__name__)
+
+WHATSAPP_API_URL = os.getenv("WHATSAPP_API_URL", "https://7107.api.greenapi.com")
+WHATSAPP_INSTANCE_ID = os.getenv("WHATSAPP_INSTANCE_ID", "")
+WHATSAPP_API_KEY_ENV = os.getenv("WHATSAPP_API_KEY", "")
+
+
+def text_to_audio(text: str) -> bytes:
+    """
+    Convierte texto a audio MP3 via gTTS (Google TTS, gratis).
+    Idioma: español (es). Retorna bytes del archivo MP3.
+    """
+    tts = gTTS(text=text, lang='es', slow=False)
+    mp3_buffer = io.BytesIO()
+    tts.write_to_fp(mp3_buffer)
+    return mp3_buffer.getvalue()
+
+
+def send_voice_message(to: str, text: str) -> dict:
+    """
+    Genera audio de Monserrat y lo envía como mensaje de voz por WhatsApp.
+    Green API acepta MP3 directamente via sendFileByUpload.
+    """
+    try:
+        # 1. Generar audio
+        audio_bytes = text_to_audio(text)
+        logger.info(f"Audio generado: {len(audio_bytes)} bytes para {to[:6]}***")
+
+        # 2. Enviar como archivo de audio via Green API
+        chat_id = f"{to}@c.us" if "@" not in to else to
+        url = f"{WHATSAPP_API_URL}/waInstance{WHATSAPP_INSTANCE_ID}/sendFileByUpload/{WHATSAPP_API_KEY_ENV}"
+
+        files = {
+            "file": ("monserrat_audio.mp3", io.BytesIO(audio_bytes), "audio/mpeg")
+        }
+        data = {
+            "chatId": chat_id,
+            "caption": ""
+        }
+
+        resp = requests.post(url, files=files, data=data, timeout=30)
+        resp.raise_for_status()
+        logger.info(f"Mensaje de voz enviado a {to[:6]}***")
+        return resp.json()
+
+    except Exception as e:
+        logger.error(f"Error enviando voz emot {to[:6]}***: {e}")
+        return {"error": str(e)}
+
+
+def should_send_voice(message_type: str) -> bool:
+    """
+    Regla oficial de canal — Emovils OPC:
+    - Cliente envía nota de voz (type='audio') → Monserrat responde con voz
+    - Cliente escribe texto → Monserrat responde con texto
+    """
+    return message_type == "audio"
