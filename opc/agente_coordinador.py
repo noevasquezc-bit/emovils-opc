@@ -661,21 +661,29 @@ _TABLA_CONVERSACIONES = os.getenv("AIRTABLE_CONVERSATIONS_TABLE", "Conversations
 
 
 def _cargar_memoria_persistente(whatsapp_cliente: str) -> list[dict]:
-    """Carga el historial del cliente desde Airtable (persiste entre workers/restarts)."""
+    """Carga el historial del cliente desde Airtable. La cache RAM es siempre
+    la fuente de verdad — Airtable es solo backup para restarts."""
+    # Si ya hay cache RAM, NUNCA la sobrescribimos con [] si Airtable falla.
     if whatsapp_cliente in _MEMORIA_CONVERSACIONES:
         return _MEMORIA_CONVERSACIONES[whatsapp_cliente]
+    # Primer mensaje del cliente — intentar restaurar de Airtable
     try:
         api = AirtableOPC()
-        existente = api.buscar_por_campo(_TABLA_CONVERSACIONES, "WhatsApp", whatsapp_cliente)
-        if existente:
-            raw = existente.get("fields", {}).get("Historial", "[]")
-            historial = json.loads(raw) if isinstance(raw, str) else []
-            _MEMORIA_CONVERSACIONES[whatsapp_cliente] = historial[-_MAX_TURNOS_MEMORIA:]
-            return _MEMORIA_CONVERSACIONES[whatsapp_cliente]
+        for nombre_campo in ("WhatsApp", "whatsapp", "Whatsapp", "Phone", "Telefono"):
+            try:
+                existente = api.buscar_por_campo(_TABLA_CONVERSACIONES, nombre_campo, whatsapp_cliente)
+                if existente:
+                    raw = existente.get("fields", {}).get("Historial", "") or existente.get("fields", {}).get("historial", "[]")
+                    historial = json.loads(raw) if isinstance(raw, str) and raw else []
+                    _MEMORIA_CONVERSACIONES[whatsapp_cliente] = historial[-_MAX_TURNOS_MEMORIA:]
+                    return _MEMORIA_CONVERSACIONES[whatsapp_cliente]
+            except Exception:
+                continue  # probar siguiente nombre de campo
     except Exception as exc:
         logger.warning("No se pudo cargar memoria de Airtable: %s", exc)
+    # Si llegamos aqui = primer mensaje real, inicializar cache vacia
     _MEMORIA_CONVERSACIONES[whatsapp_cliente] = []
-    return []
+    return _MEMORIA_CONVERSACIONES[whatsapp_cliente]
 
 
 def _guardar_memoria_persistente(whatsapp_cliente: str, nombre: str = "") -> None:
