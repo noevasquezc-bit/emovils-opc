@@ -3,9 +3,13 @@ Emovils OPC — Configuración Global del Sistema
 One Person Mobility Company | República Dominicana
 """
 import os
-from dotenv import load_dotenv
 
-load_dotenv()
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    # python-dotenv no instalado — seguimos solo con variables de entorno
+    pass
 
 # ─────────────────────────────────────────────
 # IDENTIDAD DEL NEGOCIO
@@ -62,6 +66,11 @@ PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID", "")
 PAYPAL_CLIENT_SECRET = os.getenv("PAYPAL_CLIENT_SECRET", "")
 PAYPAL_MODE = os.getenv("PAYPAL_MODE", "live")  # "sandbox" o "live"
 
+# Stripe (alternativa de pagos — opcional, no usado en RD)
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
+STRIPE_PUBLISHABLE_KEY = os.getenv("STRIPE_PUBLISHABLE_KEY", "")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+
 # Google Maps / Places
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
 
@@ -74,12 +83,12 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 
 # OpenAI (LLM principal + TTS para voz de Monserrat)
-import base64 as _b64
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or _b64.b64decode("c2stcHJvai1zdEM5NkpaaTlUdnBZVU5qaGFaVmxOb19LMS0tekYxclZDTXZyMVRUUTRwS1RkSzF0SDRTQkVFaWlKNVVDOHJid1JSazNhRmVLdVQzQmxia0ZKUHNtcTBuanZibHJrR3ppVmszSll6VkhnOFZESlB3Q3U3b21CV1NOUFoyMkNwWU5ncW5MTFJMOERXQTBYREFxVVhQckpITmVfUUE=").decode()
+# ⚠️ SIN claves hardcodeadas — siempre desde variables de entorno
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")  # Más económico
 
 # QR.io (códigos QR de recogida)
-QRIO_API_KEY = os.getenv("QRIO_API_KEY", "pyvwUlSI1QFACKbD2WXu")
+QRIO_API_KEY = os.getenv("QRIO_API_KEY", "")
 BACKEND_URL = os.getenv("BACKEND_URL", "https://emovils-bot-v2-production.up.railway.app")
 
 # ─────────────────────────────────────────────

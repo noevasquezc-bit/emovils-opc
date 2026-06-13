@@ -39,11 +39,19 @@ QR_SECRET = os.getenv("EMOVILS_QR_SECRET", "emovils-dev-secret-change-in-prod")
 QR_SERVICIO_TTL_HORAS = 24
 
 # Path donde se guardan los PNG generados
+# Default: ./qrs junto a este módulo (sin rutas absolutas hardcodeadas)
 QR_OUTPUT_DIR = Path(os.getenv(
     "EMOVILS_QR_DIR",
-    "/Users/noevasquez/Desktop/PROYECTO OPC/emovils-opc/opc/qrs"
+    str(Path(__file__).resolve().parent / "qrs"),
 ))
-QR_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+try:
+    QR_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+except OSError as _exc:
+    # Degradación elegante: si la ruta no es escribible, usar /tmp
+    logger.warning("No pude crear %s (%s) — uso directorio temporal", QR_OUTPUT_DIR, _exc)
+    import tempfile
+    QR_OUTPUT_DIR = Path(tempfile.gettempdir()) / "emovils_qrs"
+    QR_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ─────────────────────────────────────────────────────────────

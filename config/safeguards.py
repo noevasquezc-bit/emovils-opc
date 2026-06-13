@@ -88,7 +88,8 @@ class CPAEvaluator:
         margin = service_price - cpa
         roi = round(((service_price - cpa) / cpa) * 100, 1) if cpa > 0 else 0
 
-        if cpa < self.limits.MAX_CPA_SAFE:
+        # CPA = $6 exacto sigue siendo saludable (el MÁXIMO permitido es $6)
+        if cpa <= self.limits.MAX_CPA_SAFE:
             return {
                 "cpa": cpa,
                 "status": CPAStatus.SALUDABLE,

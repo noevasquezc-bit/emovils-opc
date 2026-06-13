@@ -2,12 +2,30 @@
 Emovils OPC — Stripe API (Pagos digitales)
 Reduce informalidad, confirma reservas con pago real.
 """
-import stripe
 import logging
 from config.settings import STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET
 
 logger = logging.getLogger(__name__)
-stripe.api_key = STRIPE_SECRET_KEY
+
+# El SDK de Stripe es opcional (en RD usamos PayPal — ver lib/paypal_api.py).
+# Si no está instalado, el módulo importa igual y las funciones degradan con error claro.
+try:
+    import stripe
+    stripe.api_key = STRIPE_SECRET_KEY
+except ImportError:
+    stripe = None
+    logger.warning("SDK 'stripe' no instalado — lib.stripe_api en modo degradado (usa PayPal)")
+
+
+def _stripe_listo() -> bool:
+    """True si el SDK está instalado y hay clave secreta configurada."""
+    if stripe is None:
+        logger.warning("Stripe no disponible: falta el paquete 'stripe' (pip install stripe)")
+        return False
+    if not STRIPE_SECRET_KEY:
+        logger.warning("Stripe no disponible: falta STRIPE_SECRET_KEY en el .env")
+        return False
+    return True
 
 EMOVILS_PRODUCTS = {
     "airport_sencillo": {
@@ -44,6 +62,8 @@ def create_payment_link(
     Crea un link de pago de Stripe para enviar por WhatsApp.
     Retorna el URL del link de pago.
     """
+    if not _stripe_listo():
+        return {"error": "stripe_no_configurado", "payment_url": None}
     product_info = EMOVILS_PRODUCTS.get(product_key, EMOVILS_PRODUCTS["airport_sencillo"])
     price_cents = custom_price_usd if custom_price_usd else product_info["price_usd"]
 
@@ -86,6 +106,8 @@ def create_payment_link(
 
 def verify_payment(session_id: str) -> dict:
     """Verifica si un pago fue completado."""
+    if not _stripe_listo():
+        return {"error": "stripe_no_configurado", "session_id": session_id, "paid": False}
     session = stripe.checkout.Session.retrieve(session_id)
     return {
         "session_id": session_id,
@@ -102,6 +124,8 @@ def handle_webhook(payload: bytes, sig_header: str) -> dict:
     Procesa webhooks de Stripe.
     Retorna el evento y datos relevantes si el pago fue completado.
     """
+    if not _stripe_listo():
+        return {"event": "stripe_no_configurado", "processed": False}
     try:
         event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
     except stripe.error.SignatureVerificationError as e:
@@ -124,6 +148,8 @@ def handle_webhook(payload: bytes, sig_header: str) -> dict:
 
 def create_refund(payment_intent_id: str, reason: str = "requested_by_customer") -> dict:
     """Procesa un reembolso."""
+    if not _stripe_listo():
+        return {"error": "stripe_no_configurado", "refund_id": None, "status": "no_disponible"}
     refund = stripe.Refund.create(
         payment_intent=payment_intent_id,
         reason=reason

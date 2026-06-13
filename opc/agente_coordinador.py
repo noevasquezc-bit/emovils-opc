@@ -65,6 +65,7 @@ from opc.agente_despachador import (
     mensaje_cliente_chofer_asignado,
     mensaje_oferta_chofer,
 )
+from opc.pagos import crear_link_pago, rd_a_usd
 from opc.precios import calcular_tarifa, explicar_tarifa
 from opc.qr_generator_opc import generar_qr_cliente
 
@@ -349,7 +350,7 @@ def extraer_datos_cotizacion(texto: str) -> DatosCotizacion:
 
 
 # ─────────────────────────────────────────────────────────────
-# ESTIMACIÓN DE KM (sin Google Maps por ahora)
+# ESTIMACIÓN DE KM (Google Maps si hay API key, tabla fija si no)
 # ─────────────────────────────────────────────────────────────
 
 KM_APROXIMADO = {
@@ -369,8 +370,34 @@ KM_APROXIMADO = {
 }
 
 
+def _km_via_google_maps(origen: str, destino: str) -> Optional[float]:
+    """Distancia real con Google Maps Distance Matrix (lib/google_maps).
+    Devuelve None si no hay GOOGLE_MAPS_API_KEY o si la API falla."""
+    if not os.getenv("GOOGLE_MAPS_API_KEY"):
+        return None
+    try:
+        from lib.google_maps import get_distance_matrix
+        r = get_distance_matrix(
+            f"{origen}, República Dominicana",
+            f"{destino}, República Dominicana",
+        )
+        if "error" not in r and r.get("distance_km"):
+            km = round(float(r["distance_km"]), 1)
+            logger.info("📏 Google Maps: %s → %s = %s km", origen, destino, km)
+            return km
+    except Exception as exc:
+        logger.warning("Google Maps falló (%s) — uso tarifario fijo", exc)
+    return None
+
+
 def estimar_km(origen: str, destino: str) -> float:
-    """Estimación grosera. En producción se reemplaza con Google Maps API."""
+    """Estima los km del viaje.
+    1) Google Maps si GOOGLE_MAPS_API_KEY está configurada.
+    2) Fallback: tabla fija KM_APROXIMADO (tarifario)."""
+    km_real = _km_via_google_maps(origen, destino)
+    if km_real is not None:
+        return km_real
+
     o = origen.lower()
     d = destino.lower()
 
@@ -571,6 +598,14 @@ def crear_reserva_y_asignar(
         estado_pago="PENDIENTE",
     )
 
+    # Link de pago PayPal (None si faltan credenciales — el flujo sigue igual)
+    link_pago = crear_link_pago(
+        booking_id=servicio_id,
+        monto_usd=rd_a_usd(servicio_norm.tarifa_rd),
+        descripcion=f"Emovils: {datos.origen} → {datos.destino}",
+    )
+    nota_pago = f"\n💳 Paga seguro aquí: {link_pago}" if link_pago else ""
+
     # Cargar conductores DISPONIBLES desde Airtable
     try:
         choferes = api.conductores_disponibles()
@@ -609,9 +644,11 @@ def crear_reserva_y_asignar(
         return {
             "servicio_id": servicio_id,
             "qr_path": str(qr_path),
+            "link_pago": link_pago,
             "mensaje_cliente": (
                 f"✅ Reserva creada (#{servicio_id}).\n"
                 f"⏳ Buscando conductor disponible — te aviso en cuanto haya uno asignado."
+                f"{nota_pago}"
             ),
             "mensaje_chofer": "",
             "chofer_asignado": None,
@@ -622,7 +659,8 @@ def crear_reserva_y_asignar(
         return {
             "servicio_id": servicio_id,
             "qr_path": str(qr_path),
-            "mensaje_cliente": "⏳ Buscando conductor disponible...",
+            "link_pago": link_pago,
+            "mensaje_cliente": f"⏳ Buscando conductor disponible...{nota_pago}",
             "mensaje_chofer": "",
             "chofer_asignado": None,
         }
@@ -631,7 +669,8 @@ def crear_reserva_y_asignar(
     return {
         "servicio_id": servicio_id,
         "qr_path": str(qr_path),
-        "mensaje_cliente": mensaje_cliente_chofer_asignado(solicitud, chofer, eta_minutos=10),
+        "link_pago": link_pago,
+        "mensaje_cliente": mensaje_cliente_chofer_asignado(solicitud, chofer, eta_minutos=10) + nota_pago,
         "mensaje_chofer": mensaje_oferta_chofer(solicitud, chofer),
         "chofer_asignado": chofer.chofer_id,
     }

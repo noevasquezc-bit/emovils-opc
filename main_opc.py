@@ -9,6 +9,7 @@ Endpoints nuevos para el sistema OPC:
   /api/v2/intelcia/ingestar — Procesa Excel de Intelcia
   /api/v2/reporte/diario    — Genera reporte para el dueño
   /api/v2/liquidaciones/quincena — Cierra quincena
+  /api/v2/safeguards/cpa    — Evalúa CPA (regla del $6 inviolable)
   /health                   — Healthcheck
 """
 import logging
@@ -202,6 +203,8 @@ def reservar():
             whatsapp_cliente=data["whatsapp"],
             fecha=data.get("fecha"),
         )
+        # resultado incluye "link_pago" (PayPal) cuando hay credenciales;
+        # el mensaje_cliente ya lo trae integrado para WhatsApp.
         return jsonify(resultado)
     except Exception as e:
         logger.error(f"Error en /reservar: {e}")
@@ -494,6 +497,54 @@ def cerrar_quincena_endpoint():
         })
     except Exception as e:
         logger.error(f"Error /liquidaciones/quincena: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════
+# SAFEGUARD CPA — EL $6 ES INVIOLABLE
+# ═══════════════════════════════════════════════════════════════
+
+@app.route("/api/v2/safeguards/cpa", methods=["POST"])
+def safeguards_cpa():
+    """
+    Evalúa el CPA del piloto con la regla del $6 máximo (config/safeguards.py).
+
+    Body JSON: { "gasto_usd": 45.0, "clientes_nuevos": 10 }
+    Respuesta: { "cpa": 4.5, "estado": "ok|alerta|pausar", "mensaje": "..." }
+    """
+    data = request.get_json(force=True) or {}
+    try:
+        gasto_usd = float(data.get("gasto_usd", 0))
+        clientes_nuevos = int(data.get("clientes_nuevos", 0))
+
+        from config.safeguards import CPAEvaluator, CPAStatus
+
+        evaluacion = CPAEvaluator().evaluate(
+            total_spent=gasto_usd, total_clients=clientes_nuevos
+        )
+
+        # Mapear estados internos → contrato simple del endpoint
+        mapa_estado = {
+            CPAStatus.SALUDABLE: "ok",
+            CPAStatus.ALERTA_AMARILLA: "alerta",
+            CPAStatus.ALERTA_ROJA: "pausar",
+            CPAStatus.CATASTROFE: "pausar",
+        }
+
+        return jsonify({
+            "cpa": evaluacion["cpa"],
+            "estado": mapa_estado.get(evaluacion["status"], "alerta"),
+            "mensaje": evaluacion["message"],
+            "accion": evaluacion["action"],
+            "pausar_anuncios": evaluacion["pause_ads"],
+            "alertar_dueno": evaluacion["alert_owner"],
+            "margen_usd": evaluacion.get("margin_usd"),
+            "roi_pct": evaluacion.get("roi_percent"),
+        })
+    except (TypeError, ValueError) as e:
+        return jsonify({"error": f"Datos inválidos: {e}"}), 400
+    except Exception as e:
+        logger.error(f"Error /safeguards/cpa: {e}")
         return jsonify({"error": str(e)}), 500
 
 
