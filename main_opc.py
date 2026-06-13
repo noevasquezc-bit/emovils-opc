@@ -45,11 +45,13 @@ from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 
 from opc.agente_coordinador import (
-    procesar_mensaje_entrante,
     crear_reserva_y_asignar,
     extraer_datos_cotizacion,
     generar_cotizacion,
 )
+# MVP: usar monserrat_mvp en vez del coordinador completo
+from opc.monserrat_mvp import procesar as procesar_mensaje_entrante
+import opc.mvp as mvp_core
 from opc.agente_ingesta import procesar_excel_intelcia
 from opc.agente_financiero import cerrar_quincena, reporte_liquidaciones_whatsapp
 from opc.agente_reportes import generar_reporte_diario, formato_whatsapp
@@ -280,8 +282,12 @@ def whatsapp_webhook():
             elif type_msg in ("audioMessage", "pttMessage"):
                 # Cliente envia nota de voz → transcribir con Whisper
                 cliente_uso_audio = True
-                audio_url = (msg_data.get("fileMessageData", {}).get("downloadUrl", "") or
-                             msg_data.get("audioMessageData", {}).get("downloadUrl", ""))
+                # FIX: Green API envia downloadUrl en multiples lugares
+                audio_url = (
+                    msg_data.get("downloadUrl", "")
+                    or msg_data.get("fileMessageData", {}).get("downloadUrl", "")
+                    or msg_data.get("audioMessageData", {}).get("downloadUrl", "")
+                )
                 texto = _transcribir_audio_whisper(audio_url) if audio_url else "Te escuche, dame un segundo"
             elif type_msg == "locationMessage":
                 # Cliente envia ubicacion (mapa) — extraer lat/lng
@@ -324,10 +330,12 @@ def whatsapp_webhook():
 
         logger.info(f"📨 Mensaje de {nombre or 'sin nombre'} ({whatsapp}): {texto[:80]}")
 
+        # MVP: pasamos cliente_uso_audio para que Monserrat sepa si responder en voz
         resultado = procesar_mensaje_entrante(
             mensaje=texto,
             whatsapp_cliente=whatsapp,
             nombre_cliente=nombre,
+            cliente_uso_audio=locals().get("cliente_uso_audio", False),
         )
 
         # ENVIO REAL al WhatsApp del cliente via Green API
@@ -793,6 +801,250 @@ def scheduler_run(job_id: str):
     except Exception as e:
         logger.error(f"Error /scheduler/run/{job_id}: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════
+# ENDPOINTS MVP — flujo cerrado de reserva + QR
+# ═══════════════════════════════════════════════════════════════
+
+@app.route("/api/v2/mvp/cotizar", methods=["POST"])
+def mvp_cotizar():
+    """Body: {origen, destino, pasajeros, hora, km_estimados?}"""
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        c = mvp_core.cotizar(
+            origen=data["origen"], destino=data["destino"],
+            pasajeros=int(data.get("pasajeros", 1)),
+            hora=int(data.get("hora", 12)),
+            km_estimados=float(data.get("km_estimados", 10.0)),
+        )
+        return jsonify({
+            "precio_rd": c.precio_rd, "vehiculo": c.vehiculo_recomendado,
+            "es_nocturno": c.es_nocturno, "requiere_supervisor": c.requiere_supervisor,
+            "razon_supervisor": c.razon_supervisor, "moneda": c.moneda,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/v2/mvp/reservar", methods=["POST"])
+def mvp_reservar():
+    """Crea reserva y devuelve QR del cliente."""
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        r = mvp_core.crear_reserva(
+            customer_name=data["customer_name"],
+            customer_phone=data["customer_phone"],
+            origin=data["origin"], destination=data["destination"],
+            passengers=int(data["passengers"]),
+            final_price=int(data["final_price"]),
+            payment_method=data.get("payment_method", "cash"),
+            vehicle_type=data.get("vehicle_type", "Sedan"),
+            service_date=data.get("service_date"),
+            service_time=data.get("service_time"),
+        )
+        return jsonify(r)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/v2/mvp/reserva/asignar", methods=["POST"])
+def mvp_asignar():
+    """Body: {booking_id, vehicle_type}"""
+    data = request.get_json(force=True, silent=True) or {}
+    res = mvp_core.asignar_conductor_y_vehiculo(
+        booking_id=data["booking_id"],
+        vehicle_type=data.get("vehicle_type", "Sedan"),
+    )
+    return jsonify(res)
+
+
+@app.route("/api/v2/mvp/reserva/<booking_id>", methods=["GET"])
+def mvp_get_reserva(booking_id):
+    r = mvp_core.obtener_reserva(booking_id)
+    if not r:
+        return jsonify({"error": "Reserva no encontrada"}), 404
+    return jsonify(r)
+
+
+@app.route("/api/v2/mvp/qr/cliente/validar", methods=["POST"])
+def mvp_qr_cliente_validar():
+    """Body: {booking_id, token, driver_id} — conductor escanea QR del cliente."""
+    data = request.get_json(force=True, silent=True) or {}
+    res = mvp_core.verificar_qr_cliente(
+        booking_id=data["booking_id"], token=data["token"],
+        driver_id=data["driver_id"],
+    )
+    return jsonify(res)
+
+
+@app.route("/vehicle/verify/<vehicle_id>", methods=["GET"])
+def mvp_vehicle_verify_pantalla(vehicle_id):
+    """Cliente escanea QR fisico del vehiculo. Muestra pantalla verde/roja/amarilla."""
+    token = request.args.get("t", "")
+    res = mvp_core.verificar_qr_vehiculo(vehicle_id, token)
+    return _render_vehicle_verify_page(res)
+
+
+@app.route("/api/v2/mvp/vehicle/verify", methods=["POST"])
+def mvp_vehicle_verify_api():
+    """Version JSON del verificador de vehiculo."""
+    data = request.get_json(force=True, silent=True) or {}
+    res = mvp_core.verificar_qr_vehiculo(
+        vehicle_id=data["vehicle_id"], token=data.get("token", ""),
+    )
+    return jsonify(res)
+
+
+@app.route("/driver/dashboard", methods=["GET"])
+def mvp_driver_dashboard():
+    """Panel del conductor — reservas asignadas."""
+    driver_id = request.args.get("driver_id", "DRV-001")
+    reservas = mvp_core.reservas_conductor(driver_id)
+    return _render_driver_dashboard(driver_id, reservas)
+
+
+@app.route("/qr/cliente/<booking_id>", methods=["GET"])
+def mvp_qr_cliente_landing(booking_id):
+    """URL del QR del cliente — landing simple cuando lo escanean."""
+    token = request.args.get("t", "")
+    if not mvp_core.validar_token_cliente(booking_id, token):
+        return _render_simple_page("❌ QR Invalido", "Este QR no es valido.", "#dc2626")
+    reserva = mvp_core.obtener_reserva(booking_id)
+    if not reserva:
+        return _render_simple_page("❌ Reserva no encontrada", booking_id, "#dc2626")
+    return _render_simple_page(
+        f"✅ Reserva {booking_id}",
+        f"Cliente: {reserva.get('customer_name','')}<br>"
+        f"Origen: {reserva.get('origen','')}<br>"
+        f"Destino: {reserva.get('destino','')}<br>"
+        f"Pasajeros: {reserva.get('passengers',0)}<br>"
+        f"Vehiculo: {reserva.get('vehicle_type','')}<br>"
+        f"Estado: {reserva.get('booking_status','')}<br>"
+        f"💰 RD${reserva.get('final_price',0):,} ({reserva.get('payment_method','')})<br><br>"
+        f"<small>El conductor escaneara este QR al llegar.</small>",
+        "#1E5F8E",
+    )
+
+
+def _render_vehicle_verify_page(res: dict) -> str:
+    color = res.get("color", "yellow")
+    if color == "green":
+        bg, emoji, titulo = "#16a34a", "✅", "CONFIRMADO POR EMOVILS"
+        body = f"""
+            <p>Este es el vehiculo y chofer asignado a su reserva.</p>
+            <div class='card'>
+                <div><b>Chofer:</b> {res['driver']['name']}</div>
+                <div><b>Vehiculo:</b> {res['vehicle']['brand']} {res['vehicle']['model']} {res['vehicle']['color']}</div>
+                <div><b>Placa:</b> {res['vehicle']['plate']}</div>
+                <div><b>Reserva:</b> {res['booking']['code']}</div>
+                <div><b>Origen:</b> {res['booking']['origen']}</div>
+                <div><b>Destino:</b> {res['booking']['destino']}</div>
+            </div>
+            <h2>Puede abordar.</h2>
+        """
+    elif color == "red":
+        bg, emoji, titulo = "#dc2626", "❌", "NO ABORDE"
+        body = f"""
+            <p>Este vehiculo o chofer no coincide con su reserva Emovils.</p>
+            <p>Por su seguridad, no aborde y comuniquese con la central.</p>
+            <p>Razon: {res.get('razon','')}</p>
+            <a href='https://wa.me/18298610090'>Contactar Emovils Central</a>
+        """
+    else:
+        bg, emoji, titulo = "#d97706", "⚠️", "VALIDACION PENDIENTE"
+        body = f"""
+            <p>No podemos confirmar automaticamente que este vehiculo corresponde a su reserva.</p>
+            <p>No aborde hasta comunicarse con la central de Emovils.</p>
+            <p>Razon: {res.get('razon','')}</p>
+            <a href='https://wa.me/18298610090'>Contactar Emovils Central</a>
+        """
+    return f"""<!doctype html><html lang='es'><head><meta charset='utf-8'>
+<meta name='viewport' content='width=device-width, initial-scale=1'>
+<title>Emovils — Verificacion</title>
+<style>
+body{{margin:0;background:{bg};color:#fff;font-family:-apple-system,Segoe UI,sans-serif;padding:24px;min-height:100vh;display:flex;flex-direction:column;justify-content:center;align-items:center}}
+.emoji{{font-size:96px}}
+h1{{margin:8px 0 24px;text-align:center}}
+.card{{background:rgba(0,0,0,0.2);padding:16px;border-radius:12px;margin:16px 0;font-size:15px;line-height:1.7}}
+a{{display:inline-block;margin-top:16px;background:#fff;color:#000;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold}}
+h2{{font-size:22px}}
+p{{font-size:16px;line-height:1.5}}
+</style></head><body>
+<div class='emoji'>{emoji}</div>
+<h1>{titulo}</h1>
+{body}
+</body></html>"""
+
+
+def _render_driver_dashboard(driver_id: str, reservas: list) -> str:
+    rows = ""
+    for r in reservas:
+        verde = "✅" if r.get("vehicle_verification_status") == "green" else "⏳"
+        rows += f"""
+        <div class='card'>
+            <div class='top'>
+                <b>{r['booking_id']}</b>
+                <span class='estado {r['booking_status']}'>{r['booking_status']}</span>
+            </div>
+            <div>👤 {r['customer_name']} <a href='tel:{r['customer_phone']}'>{r['customer_phone']}</a></div>
+            <div>📍 <b>{r['origen']}</b> → {r['destino']}</div>
+            <div>⏰ {r['service_time']} · 👥 {r['passengers']} pax · 🚗 {r['vehicle_type']}</div>
+            <div>💰 RD${r['final_price']:,} · {r['payment_method']} ({r['payment_status']})</div>
+            <div>Verificacion vehiculo: {verde}</div>
+            <div class='actions'>
+                <button onclick="scanQR('{r['booking_id']}')">📷 Escanear QR cliente</button>
+            </div>
+        </div>
+        """
+    if not rows:
+        rows = "<p>Sin reservas asignadas.</p>"
+    return f"""<!doctype html><html lang='es'><head><meta charset='utf-8'>
+<meta name='viewport' content='width=device-width, initial-scale=1'>
+<title>Emovils — Panel Conductor</title>
+<style>
+body{{margin:0;background:#0f172a;color:#fff;font-family:-apple-system,Segoe UI,sans-serif;padding:16px}}
+h1{{font-size:20px;margin:8px 0 20px}}
+.card{{background:#1e293b;padding:16px;border-radius:12px;margin-bottom:14px;line-height:1.7}}
+.top{{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}}
+.estado{{padding:4px 10px;border-radius:6px;font-size:12px}}
+.confirmed{{background:#16a34a}}
+.in_progress{{background:#d97706}}
+.actions{{margin-top:12px}}
+button{{background:#3b82f6;color:#fff;border:0;padding:10px 16px;border-radius:8px;font-size:14px;width:100%;cursor:pointer}}
+a{{color:#60a5fa}}
+</style></head><body>
+<h1>🚗 Panel Conductor — {driver_id}</h1>
+{rows}
+<script>
+function scanQR(bookingId) {{
+    const token = prompt('Pega el token del QR del cliente (lo lees del QR):');
+    if (!token) return;
+    fetch('/api/v2/mvp/qr/cliente/validar', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{booking_id: bookingId, token: token, driver_id: '{driver_id}'}})
+    }}).then(r=>r.json()).then(d=>{{
+        if (d.ok) {{ alert('✅ Recogida confirmada'); location.reload(); }}
+        else alert('❌ ' + (d.razon || 'Error'));
+    }});
+}}
+</script>
+</body></html>"""
+
+
+def _render_simple_page(titulo: str, html: str, color: str) -> str:
+    return f"""<!doctype html><html lang='es'><head><meta charset='utf-8'>
+<meta name='viewport' content='width=device-width, initial-scale=1'>
+<title>Emovils — {titulo}</title>
+<style>
+body{{margin:0;background:{color};color:#fff;font-family:-apple-system,Segoe UI,sans-serif;padding:24px;min-height:100vh;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center}}
+h1{{margin-bottom:24px}}
+.box{{background:rgba(0,0,0,0.2);padding:24px;border-radius:12px;max-width:480px;line-height:1.7}}
+</style></head><body>
+<h1>{titulo}</h1>
+<div class='box'>{html}</div>
+</body></html>"""
 
 
 # ═══════════════════════════════════════════════════════════════
