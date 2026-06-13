@@ -134,6 +134,66 @@ def _transcribir_audio_whisper(audio_url: str):
         return None
 
 
+# Dominios de enlaces de Google Maps / compartir que vale la pena expandir.
+_MAPS_DOMINIOS = ("share.google", "maps.app.goo.gl", "goo.gl/maps",
+                  "google.com/maps", "maps.google.com", "g.co/kgs")
+
+
+def _coords_de_texto(s: str):
+    """Extrae 'lat,lng' de una URL/HTML de Google Maps si esta presente."""
+    import re
+    pats = [
+        r'@(-?\d{1,2}\.\d+),(-?\d{1,3}\.\d+)',
+        r'!3d(-?\d{1,2}\.\d+)!4d(-?\d{1,3}\.\d+)',
+        r'[?&](?:q|ll|sll|destination|daddr|center)=(-?\d{1,2}\.\d+),(-?\d{1,3}\.\d+)',
+    ]
+    for p in pats:
+        m = re.search(p, s or "")
+        if m:
+            return f"{m.group(1)},{m.group(2)}"
+    return None
+
+
+def _expandir_maps_links(texto: str) -> str:
+    """Convierte enlaces de Google Maps en algo geocodificable.
+
+    - Si el enlace lleva a un pin con coordenadas -> las inserta como 'coordenadas lat,lng'.
+    - Si lleva a una busqueda/negocio (q=Nombre) -> inserta el NOMBRE del lugar.
+    Asi Monserrat recibe datos utiles en vez de una URL opaca. Solo expande dominios
+    conocidos de Google (seguro: nunca ejecuta nada, solo extrae texto)."""
+    if not texto:
+        return texto
+    import re as _re
+    from urllib.parse import unquote_plus
+    for url in _re.findall(r'https?://[^\s]+', texto):
+        if not any(d in url.lower() for d in _MAPS_DOMINIOS):
+            continue
+        coords = _coords_de_texto(url)
+        nombre = None
+        if not coords:
+            try:
+                import requests
+                r = requests.get(url, allow_redirects=True, timeout=12,
+                                 headers={"User-Agent": "Mozilla/5.0"})
+                coords = _coords_de_texto(r.url) or _coords_de_texto(r.text[:20000])
+                if not coords:
+                    mq = _re.search(r'[?&]q=([^&]+)', r.url)
+                    if mq:
+                        cand = unquote_plus(mq.group(1)).strip()
+                        # Evitar que 'q=' sea solo coordenadas ya capturadas u otra URL
+                        if cand and not cand.startswith("http"):
+                            nombre = cand
+            except Exception as e:
+                logger.warning(f"No pude expandir maps link {url[:60]}: {e}")
+        if coords:
+            texto = texto.replace(url, f"(ubicacion compartida, coordenadas {coords})")
+            logger.info(f"🔗→📍 Link de mapa expandido a coordenadas {coords}")
+        elif nombre:
+            texto = texto.replace(url, nombre)
+            logger.info(f"🔗→🏷️ Link de mapa expandido a lugar: {nombre}")
+    return texto
+
+
 # ═══════════════════════════════════════════════════════════════
 # HEALTH CHECKS
 # ═══════════════════════════════════════════════════════════════
@@ -343,6 +403,10 @@ def whatsapp_webhook():
         else:
             if not texto:
                 return jsonify({"status": "no_text", "whatsapp": whatsapp})
+
+            # Expandir enlaces de Google Maps a coordenadas o nombre de lugar
+            if "http" in texto:
+                texto = _expandir_maps_links(texto)
 
             logger.info(f"📨 Mensaje de {nombre or 'sin nombre'} ({whatsapp}): {texto[:80]}")
 

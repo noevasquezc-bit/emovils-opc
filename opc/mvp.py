@@ -16,6 +16,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import secrets
 import sys
 from dataclasses import dataclass
@@ -86,9 +87,31 @@ def _es_hora_nocturna(hora: int) -> bool:
     return hora >= HORARIO_NOCTURNO_INICIO or hora < HORARIO_NOCTURNO_FIN
 
 
+# Coordenadas "lat, lng" (lo que manda WhatsApp al compartir ubicacion).
+_COORD_RE = re.compile(r"^\s*(-?\d{1,2}(?:\.\d+)?)\s*,\s*(-?\d{1,3}(?:\.\d+)?)\s*$")
+
+
+def _es_coordenada(texto: str) -> bool:
+    """True si el texto es un par lat,lng valido. Una coordenada es un punto EXACTO."""
+    m = _COORD_RE.match(texto or "")
+    if not m:
+        return False
+    try:
+        lat, lng = float(m.group(1)), float(m.group(2))
+        return -90 <= lat <= 90 and -180 <= lng <= 180
+    except ValueError:
+        return False
+
+
 def _normalizar_direccion(direccion: str) -> str:
-    """Agrega contexto de RD si la direccion no menciona el pais — mejora geocoding."""
+    """Agrega contexto de RD si la direccion no menciona el pais — mejora geocoding.
+
+    IMPORTANTE: si es una coordenada (lat,lng) la devuelve TAL CUAL. Agregarle
+    ", República Dominicana" rompe el geocoding (Google la interpretaria como el
+    pais entero en vez del punto exacto)."""
     d = (direccion or "").strip()
+    if _es_coordenada(d):
+        return d
     low = d.lower()
     marcadores = ["republica dominicana", "república dominicana", "rep. dom",
                   "dominican", ", do", ", rd", " do ", " rd "]
@@ -116,10 +139,17 @@ def _medir_distancia_google(origen: str, destino: str) -> Optional[dict]:
         o_norm = _normalizar_direccion(origen)
         d_norm = _normalizar_direccion(destino)
 
-        # 1) Verificar que Google encuentra AMBOS lugares con precision (no adivina)
-        go = geocode_detallado(o_norm)
-        gd = geocode_detallado(d_norm)
-        if not go.get("preciso") or not gd.get("preciso"):
+        # 1) Verificar que Google encuentra AMBOS lugares con precision (no adivina).
+        #    Las coordenadas (lat,lng) son un punto EXACTO: se aceptan sin geocodificar.
+        def _evaluar(texto_norm):
+            if _es_coordenada(texto_norm):
+                return True, {"preciso": True, "tipo": "coordenada", "formatted": texto_norm}
+            g = geocode_detallado(texto_norm)
+            return bool(g.get("preciso")), g
+
+        o_ok, go = _evaluar(o_norm)
+        d_ok, gd = _evaluar(d_norm)
+        if not o_ok or not d_ok:
             logger.info(
                 "Geocode impreciso — origen '%s' (%s) destino '%s' (%s)",
                 origen, {k: go.get(k) for k in ("preciso", "partial_match", "types", "formatted")},
