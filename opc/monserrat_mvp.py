@@ -326,7 +326,14 @@ def procesar(mensaje: str, whatsapp_cliente: str, nombre_cliente: str = "",
     client = anthropic.Anthropic(api_key=api_key)
     modelo = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5")
 
-    ahora = datetime.now()
+    # Hora de Republica Dominicana (UTC-4, sin horario de verano).
+    # Railway corre en UTC: usar datetime.now() daria una franja incorrecta.
+    try:
+        from zoneinfo import ZoneInfo
+        ahora = datetime.now(ZoneInfo("America/Santo_Domingo"))
+    except Exception:
+        from datetime import timezone, timedelta
+        ahora = datetime.now(timezone(timedelta(hours=-4)))
     dia = ["lunes","martes","miercoles","jueves","viernes","sabado","domingo"][ahora.weekday()]
     franja = "manana (Buenos dias)" if 5 <= ahora.hour < 12 else \
              "tarde (Buenas tardes)" if 12 <= ahora.hour < 19 else \

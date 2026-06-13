@@ -98,23 +98,25 @@ else:
 # HELPERS: transcripción voz + envío audio
 # ═══════════════════════════════════════════════════════════════
 
-def _transcribir_audio_whisper(audio_url: str) -> str:
+def _transcribir_audio_whisper(audio_url: str):
     """Descarga el audio de Green API y lo transcribe con OpenAI Whisper.
-    Si Whisper no está disponible, devuelve placeholder seguro."""
+    Devuelve el texto transcrito, o None si no se pudo transcribir (sin clave,
+    sin saldo, error de red, audio inaudible). El webhook usa None para pedir
+    al cliente que escriba su solicitud por texto, en vez de inventar un mensaje."""
     if not audio_url:
-        return "Te escuche, dime de nuevo por favor"
+        return None
     try:
         import requests
         from openai import OpenAI
         api_key = os.getenv("OPENAI_API_KEY", "")
         if not api_key:
-            return "Hola, recibí tu nota de voz. Dime en texto qué necesitas por favor"
+            return None
 
         # Descargar audio temporal
         import tempfile
         r = requests.get(audio_url, timeout=20)
         if r.status_code != 200:
-            return "No pude oir tu nota, escribeme por favor"
+            return None
         with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as f:
             f.write(r.content)
             audio_path = f.name
@@ -126,10 +128,10 @@ def _transcribir_audio_whisper(audio_url: str) -> str:
             )
         texto = (transcript.text or "").strip()
         logger.info(f"🎙️  Whisper transcribió: {texto[:120]}")
-        return texto or "Te escuche pero no entendí, repite por favor"
+        return texto or None
     except Exception as exc:
         logger.warning(f"Whisper fallo: {exc}")
-        return "Hola, necesito un traslado"
+        return None
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -288,7 +290,7 @@ def whatsapp_webhook():
                     or msg_data.get("fileMessageData", {}).get("downloadUrl", "")
                     or msg_data.get("audioMessageData", {}).get("downloadUrl", "")
                 )
-                texto = _transcribir_audio_whisper(audio_url) if audio_url else "Te escuche, dame un segundo"
+                texto = _transcribir_audio_whisper(audio_url) if audio_url else None
             elif type_msg == "locationMessage":
                 # Cliente envia ubicacion (mapa) — extraer lat/lng
                 loc = msg_data.get("locationMessageData", {})
@@ -322,25 +324,41 @@ def whatsapp_webhook():
             logger.warning(f"Webhook payload formato desconocido: {list(payload.keys())[:5]}")
             return jsonify({"status": "unknown_format", "keys": list(payload.keys())[:10]})
 
-        if not texto:
-            return jsonify({"status": "no_text", "whatsapp": whatsapp})
-
         if not whatsapp:
             return jsonify({"status": "no_sender"})
 
-        logger.info(f"📨 Mensaje de {nombre or 'sin nombre'} ({whatsapp}): {texto[:80]}")
+        # Cliente mandó nota de voz pero no se pudo transcribir (sin saldo OpenAI,
+        # audio inaudible, etc): respuesta formal pidiendo texto. NO invocamos a
+        # Monserrat para no quedarnos saludando en bucle sin entender el pedido.
+        if cliente_uso_audio and not texto:
+            from types import SimpleNamespace
+            logger.info(f"🎙️→📝 Audio no transcrito de {whatsapp}: pido solicitud por texto")
+            resultado = SimpleNamespace(
+                respuesta=("Disculpe, no logré escuchar con claridad su nota de voz. "
+                           "¿Sería tan amable de escribirme su solicitud por texto, por favor?"),
+                intencion="MVP",
+                accion_disparada=None,
+                envio_voz=False,
+            )
+        else:
+            if not texto:
+                return jsonify({"status": "no_text", "whatsapp": whatsapp})
 
-        # MVP: pasamos cliente_uso_audio para que Monserrat sepa si responder en voz
-        resultado = procesar_mensaje_entrante(
-            mensaje=texto,
-            whatsapp_cliente=whatsapp,
-            nombre_cliente=nombre,
-            cliente_uso_audio=locals().get("cliente_uso_audio", False),
-        )
+            logger.info(f"📨 Mensaje de {nombre or 'sin nombre'} ({whatsapp}): {texto[:80]}")
+
+            # MVP: pasamos cliente_uso_audio para que Monserrat sepa si responder en voz
+            resultado = procesar_mensaje_entrante(
+                mensaje=texto,
+                whatsapp_cliente=whatsapp,
+                nombre_cliente=nombre,
+                cliente_uso_audio=locals().get("cliente_uso_audio", False),
+            )
 
         # ENVIO REAL al WhatsApp del cliente via Green API
         # Si el cliente usó audio → respondemos con audio (gTTS)
-        usar_voz = locals().get("cliente_uso_audio", False)
+        # Voz solo si el cliente usó audio Y logramos transcribirlo (texto truthy).
+        # Si el audio no se pudo transcribir, respondemos por TEXTO pidiendo que escriba.
+        usar_voz = locals().get("cliente_uso_audio", False) and bool(texto)
         envio_status = "no_intentado"
         envio_detalle = ""
         try:
