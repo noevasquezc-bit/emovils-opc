@@ -10,6 +10,10 @@ Endpoints nuevos para el sistema OPC:
   /api/v2/reporte/diario    — Genera reporte para el dueño
   /api/v2/liquidaciones/quincena — Cierra quincena
   /api/v2/safeguards/cpa    — Evalúa CPA (regla del $6 inviolable)
+  /api/v2/social/planificar — Plan semanal de contenido (7 posts)
+  /api/v2/social/publicar   — Publica post aprobado (Meta Graph API)
+  /api/v2/prospeccion/buscar — Pipeline de prospección B2B
+  /api/v2/ncf/emitir        — Emite factura NCF (DGII)
   /health                   — Healthcheck
 """
 import logging
@@ -53,6 +57,9 @@ from opc.qr_generator_opc import (
     verificar_qr_vehiculo_para_cliente,
 )
 from opc.airtable_api_opc import AirtableOPC
+from opc.agente_social import planificar_semana, publicar_post, procesar_aprobacion
+from opc.agente_prospector import ejecutar_pipeline_prospeccion
+from opc.sistema_ncf import generar_factura
 
 
 logging.basicConfig(
@@ -545,6 +552,145 @@ def safeguards_cpa():
         return jsonify({"error": f"Datos inválidos: {e}"}), 400
     except Exception as e:
         logger.error(f"Error /safeguards/cpa: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════
+# AGENTE SOCIAL — PLAN SEMANAL + PUBLICACIÓN META
+# ═══════════════════════════════════════════════════════════════
+
+@app.route("/api/v2/social/planificar", methods=["POST"])
+def social_planificar():
+    """
+    Genera el plan de contenido de 7 días (caption + imagen + hashtags) y lo
+    guarda en la cola de aprobación de Airtable (estado Pendiente_Aprobacion).
+
+    Body JSON (todo opcional):
+      { "fecha_inicio": "2026-06-15", "guardar_airtable": true }
+
+    Sin tokens (LLM/Airtable) responde igual en modo mock con plantillas.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        resultado = planificar_semana(
+            fecha_inicio=data.get("fecha_inicio"),
+            guardar_airtable=bool(data.get("guardar_airtable", True)),
+        )
+        return jsonify(resultado)
+    except Exception as e:
+        logger.error(f"Error /social/planificar: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/v2/social/publicar", methods=["POST"])
+def social_publicar():
+    """
+    Aprueba y/o publica un post en Facebook/Instagram via Meta Graph API.
+
+    Body JSON:
+      { "post_id": "recXXXX",                  # opcional: aprueba en Airtable
+        "aprobado": true,                       # default true
+        "post": { "caption": "...", "hashtags": "...", "image_url": "..." } }
+
+    Sin META_ACCESS_TOKEN responde {"modo": "mock", ...} sin llamadas reales.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        post = data.get("post") or {}
+        post_id = data.get("post_id")
+        aprobado = bool(data.get("aprobado", True))
+
+        resultado_aprobacion = None
+        if post_id:
+            resultado_aprobacion = procesar_aprobacion(post_id, aprobado)
+            if not aprobado:
+                return jsonify({
+                    "modo": resultado_aprobacion.get("modo", "mock"),
+                    "aprobacion": resultado_aprobacion,
+                    "publicacion": None,
+                    "mensaje": "Post rechazado, no se publica.",
+                })
+            # Si no mandaron el post explícito, usar el de Airtable
+            if not post and resultado_aprobacion.get("post"):
+                post = {"caption": resultado_aprobacion["post"].get("caption", "")}
+
+        if not post.get("caption"):
+            return jsonify({"error": "Falta post.caption (o post_id válido)"}), 400
+
+        resultado_pub = publicar_post(post)
+        return jsonify({
+            "modo": resultado_pub.get("modo", "mock"),
+            "aprobacion": resultado_aprobacion,
+            "publicacion": resultado_pub,
+        })
+    except Exception as e:
+        logger.error(f"Error /social/publicar: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════
+# PROSPECCIÓN B2B — PIPELINE COMPLETO
+# ═══════════════════════════════════════════════════════════════
+
+@app.route("/api/v2/prospeccion/buscar", methods=["POST"])
+def prospeccion_buscar():
+    """
+    Corre el pipeline: buscar (Apify o mock) → enriquecer (Apollo o mock)
+    → generar emails outreach → guardar en Pipeline_Comercial.
+
+    Body JSON (todo opcional):
+      { "fuente": "google_maps" | "hoteles" | "call_centers",
+        "busqueda": "call center Santo Domingo",
+        "max_resultados": 10,
+        "generar_emails": true,
+        "guardar": true }
+
+    Sin APIFY/APOLLO/Airtable responde {"modo": "mock", ...} con datos semilla.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        resultado = ejecutar_pipeline_prospeccion(
+            fuente=data.get("fuente", "google_maps"),
+            busqueda=data.get("busqueda"),
+            max_resultados=int(data.get("max_resultados", 10)),
+            generar_emails=bool(data.get("generar_emails", True)),
+            guardar=bool(data.get("guardar", True)),
+        )
+        return jsonify(resultado)
+    except Exception as e:
+        logger.error(f"Error /prospeccion/buscar: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════
+# FACTURACIÓN NCF (DGII)
+# ═══════════════════════════════════════════════════════════════
+
+@app.route("/api/v2/ncf/emitir", methods=["POST"])
+def ncf_emitir():
+    """
+    Emite una factura con NCF dominicano (B01 si hay RNC, B02 si no).
+
+    Body JSON:
+      { "servicio": { "descripcion": "Transfer AILA → Casa de Campo",
+                      "monto_rd": 8500, "fecha": "2026-06-12" },
+        "cliente":  { "nombre": "Empresa X", "email": "pagos@x.com" },
+        "rnc": "131123456" }
+
+    Sin Airtable responde {"modo": "mock", ...} con secuencia local.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        resultado = generar_factura(
+            servicio=data.get("servicio") or {},
+            cliente=data.get("cliente") or {},
+            rnc=data.get("rnc", ""),
+        )
+        if not resultado.get("ok"):
+            return jsonify(resultado), 400
+        return jsonify(resultado)
+    except Exception as e:
+        logger.error(f"Error /ncf/emitir: {e}")
         return jsonify({"error": str(e)}), 500
 
 

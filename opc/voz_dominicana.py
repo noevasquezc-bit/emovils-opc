@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 OUTPUT_DIR = Path(os.getenv(
     "EMOVILS_VOZ_DIR",
-    "/Users/noevasquez/Desktop/PROYECTO OPC/emovils-opc/opc/audios"
+    str(Path(__file__).resolve().parent / "audios"),
 ))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -38,19 +38,25 @@ class VozDominicana:
         voice_id: str | None = None,
     ):
         self.api_key = api_key or os.getenv("ELEVENLABS_API_KEY", "")
-        # Voz por defecto: "Bella" (genérica español). Reemplazar con voz dominicana clonada.
-        self.voice_id = voice_id or os.getenv("ELEVENLABS_VOICE_ID", "EXAVITQu4vr4xnSDxMaL")
+        # Voz dominicana clonada. Solo se usa ElevenLabs si key + voice_id existen.
+        self.voice_id = voice_id or os.getenv("ELEVENLABS_VOICE_ID", "")
 
         # Modelo: el más nuevo que soporta español rico
         self.model_id = os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2")
+
+    def _elevenlabs_configurado(self) -> bool:
+        """ElevenLabs real solo si hay API key Y voice id configurados."""
+        return bool(self.api_key and self.voice_id)
 
     def hablar(self, texto: str, nombre_archivo: str = "audio.mp3") -> Path | None:
         """
         Convierte texto a MP3.
 
-        Devuelve el Path del archivo generado, o None si está en modo MOCK.
+        Con ELEVENLABS_API_KEY + ELEVENLABS_VOICE_ID usa ElevenLabs (REST,
+        sin SDK). Sin tokens — o si ElevenLabs falla — cae a gTTS.
+        Devuelve el Path del archivo generado, o None si nada disponible.
         """
-        if not self.api_key:
+        if not self._elevenlabs_configurado():
             return self._modo_mock(texto, nombre_archivo)
 
         url = f"{self.BASE_URL}/text-to-speech/{self.voice_id}"
@@ -74,15 +80,15 @@ class VozDominicana:
             r = requests.post(url, headers=headers, json=body, timeout=30)
             if not r.ok:
                 logger.error(f"ElevenLabs {r.status_code}: {r.text[:200]}")
-                return None
+                return self._modo_mock(texto, nombre_archivo)
 
             output_path = OUTPUT_DIR / nombre_archivo
             output_path.write_bytes(r.content)
-            logger.info(f"Audio generado: {output_path}")
+            logger.info(f"Audio ElevenLabs generado: {output_path}")
             return output_path
         except requests.RequestException as e:
-            logger.error(f"Error ElevenLabs: {e}")
-            return None
+            logger.error(f"Error ElevenLabs: {e} — fallback a gTTS")
+            return self._modo_mock(texto, nombre_archivo)
 
     def _modo_mock(self, texto: str, nombre_archivo: str) -> Path | None:
         """Si no hay ElevenLabs configurado, intenta gTTS como fallback básico."""
@@ -110,7 +116,7 @@ class VozDominicana:
 
     def estado(self) -> dict:
         """Devuelve si el cliente está configurado correctamente."""
-        configurado = bool(self.api_key)
+        configurado = self._elevenlabs_configurado()
         info = {
             "elevenlabs_configurado": configurado,
             "voice_id": self.voice_id if configurado else "no_configurado",

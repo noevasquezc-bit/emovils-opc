@@ -15,13 +15,17 @@ Modo MVP: usa templates conocidos + URLs públicas RD para semilla inicial.
 Fase 2: integrar con Apify scraping para escala.
 """
 from __future__ import annotations
+import json
 import logging
 import os
+import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+import requests
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -346,6 +350,348 @@ def plantilla_para_tipo(tipo_empresa: str) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────
+# BÚSQUEDA DE PROSPECTOS (Apify Google Maps o semilla mock)
+# ─────────────────────────────────────────────────────────────
+
+APIFY_API_BASE = "https://api.apify.com/v2"
+# Actor de scraping de Google Maps (Apify Store)
+APIFY_ACTOR_GOOGLE_MAPS = os.getenv("APIFY_ACTOR_ID", "compass~crawler-google-places")
+
+BUSQUEDAS_POR_FUENTE = {
+    "google_maps": "call center Santo Domingo Dominican Republic",
+    "hoteles": "hotel 5 estrellas Punta Cana Dominican Republic",
+    "call_centers": "call center BPO Santo Domingo Dominican Republic",
+}
+
+
+def _inferir_tipo_empresa(nombre: str, categoria: str = "") -> str:
+    texto = f"{nombre} {categoria}".lower()
+    if any(k in texto for k in ("call center", "bpo", "contact center", "teleperformance")):
+        return "Call_Center"
+    if any(k in texto for k in ("hotel", "resort", "villas", "lodge")):
+        return "Hotel"
+    if any(k in texto for k in ("cruise", "crucero", "naviera", "shipping")):
+        return "Naviera"
+    if any(k in texto for k in ("travel", "tours", "viajes", "dmc", "excursion")):
+        return "Agencia_Viajes"
+    return "Corporativo_Otro"
+
+
+def _prospecto_desde_apify(item: dict, fuente: str) -> Prospect:
+    """Mapea un item del dataset Apify Google Maps → Prospect."""
+    nombre = item.get("title") or item.get("name") or "Desconocido"
+    tipo = _inferir_tipo_empresa(nombre, item.get("categoryName", ""))
+    return Prospect(
+        nombre_empresa=nombre,
+        tipo_empresa=tipo,
+        razon_potencial=f"Encontrado por scraping ({fuente}) · categoría: "
+                        f"{item.get('categoryName', 'N/D')}",
+        whatsapp=item.get("phone", "") or item.get("phoneUnformatted", ""),
+        sitio_web=item.get("website", "") or item.get("url", ""),
+        direccion=item.get("address", ""),
+        ciudad=item.get("city", "") or "Santo Domingo",
+        fuente_scraping="Apify_Google_Maps",
+        score=70,
+        notas=f"Rating Google: {item.get('totalScore', 'N/D')} "
+              f"({item.get('reviewsCount', 0)} reseñas)",
+    )
+
+
+def buscar_prospectos(
+    fuente: str = "google_maps",
+    busqueda: str | None = None,
+    max_resultados: int = 20,
+) -> dict:
+    """
+    Busca prospectos B2B.
+
+    Con APIFY_API_TOKEN ejecuta el actor de Google Maps de Apify (HTTP real,
+    síncrono). Sin token devuelve prospectos mock realistas del catálogo
+    semilla RD (call centers, hoteles, navieras...).
+
+    Devuelve {"modo": "real"|"mock", "fuente": ..., "prospectos": [dict, ...]}
+    """
+    token = os.getenv("APIFY_API_TOKEN", "")
+    busqueda = busqueda or BUSQUEDAS_POR_FUENTE.get(fuente, BUSQUEDAS_POR_FUENTE["google_maps"])
+
+    if token:
+        try:
+            url = (
+                f"{APIFY_API_BASE}/acts/{APIFY_ACTOR_GOOGLE_MAPS}"
+                f"/run-sync-get-dataset-items?token={token}"
+            )
+            payload = {
+                "searchStringsArray": [busqueda],
+                "maxCrawledPlacesPerSearch": max_resultados,
+                "language": "es",
+            }
+            r = requests.post(url, json=payload, timeout=300)
+            if not r.ok:
+                logger.error("Apify %s: %s", r.status_code, r.text[:200])
+                raise RuntimeError(f"Apify devolvió {r.status_code}")
+            items = r.json() if isinstance(r.json(), list) else []
+            prospectos = [_prospecto_desde_apify(i, fuente) for i in items[:max_resultados]]
+            return {
+                "modo": "real",
+                "fuente": "Apify_Google_Maps",
+                "busqueda": busqueda,
+                "total": len(prospectos),
+                "prospectos": [asdict(p) for p in prospectos],
+            }
+        except Exception as exc:
+            logger.warning("Apify falló (%s), usando catálogo semilla", exc)
+
+    # MOCK: catálogo semilla realista de empresas RD
+    semilla = generar_prospects_semilla()
+    if fuente == "hoteles":
+        semilla = [p for p in semilla if p.tipo_empresa == "Hotel"]
+    elif fuente == "call_centers":
+        semilla = [p for p in semilla if p.tipo_empresa == "Call_Center"]
+    prospectos = semilla[:max_resultados]
+    return {
+        "modo": "mock",
+        "fuente": "Catalogo_RD_Manual",
+        "busqueda": busqueda,
+        "total": len(prospectos),
+        "prospectos": [asdict(p) for p in prospectos],
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# ENRIQUECIMIENTO (Apollo API o mock)
+# ─────────────────────────────────────────────────────────────
+
+def _slug_empresa(nombre: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "", nombre.lower())
+    return slug[:30] or "empresa"
+
+
+def enriquecer_prospecto(prospecto: dict) -> dict:
+    """
+    Enriquece un prospecto con datos de contacto.
+
+    Con APOLLO_API_KEY consulta la API de Apollo (organizations/enrich).
+    Sin key aplica enriquecimiento mock razonable (contacto genérico +
+    patrón de email) para que el pipeline siga funcionando.
+    """
+    p = dict(prospecto)
+    api_key = os.getenv("APOLLO_API_KEY", "")
+
+    if api_key:
+        try:
+            dominio = ""
+            sitio = p.get("sitio_web", "")
+            if sitio:
+                dominio = re.sub(r"^https?://(www\.)?", "", sitio).split("/")[0]
+            r = requests.get(
+                "https://api.apollo.io/api/v1/organizations/enrich",
+                headers={"X-Api-Key": api_key, "Content-Type": "application/json"},
+                params={"domain": dominio} if dominio
+                else {"name": p.get("nombre_empresa", "")},
+                timeout=30,
+            )
+            if r.ok:
+                org = r.json().get("organization") or {}
+                p["sitio_web"] = p.get("sitio_web") or org.get("website_url", "")
+                p["linkedin_url"] = p.get("linkedin_url") or org.get("linkedin_url", "")
+                p["whatsapp"] = p.get("whatsapp") or org.get("phone", "")
+                p["notas"] = (p.get("notas", "") +
+                              f" · Apollo: {org.get('estimated_num_employees', '?')} empleados")
+                p["score"] = min(100, int(p.get("score", 50)) + 15)
+                p["enriquecido_con"] = "apollo"
+                return p
+            logger.warning("Apollo %s: %s", r.status_code, r.text[:200])
+        except Exception as exc:
+            logger.warning("Apollo falló (%s), enriquecimiento mock", exc)
+
+    # MOCK: contacto genérico + patrón de email corporativo
+    slug = _slug_empresa(p.get("nombre_empresa", ""))
+    p.setdefault("contacto_principal", "")
+    p.setdefault("cargo", "")
+    p.setdefault("email", "")
+    if not p["contacto_principal"]:
+        p["contacto_principal"] = "Gerente de Operaciones"
+        p["cargo"] = "Operations Manager"
+    if not p["email"]:
+        p["email"] = f"info@{slug}.com.do"
+    p["score"] = min(100, int(p.get("score", 50)) + 5)
+    p["enriquecido_con"] = "mock"
+    return p
+
+
+# ─────────────────────────────────────────────────────────────
+# GENERACIÓN DE EMAIL OUTREACH (LLM o plantillas JSON)
+# ─────────────────────────────────────────────────────────────
+
+PLANTILLAS_JSON_PATH = ROOT / "opc" / "data" / "plantillas_email_outreach.json"
+
+
+def _cargar_plantillas_json() -> dict:
+    """Lee opc/data/plantillas_email_outreach.json; fallback a las internas."""
+    try:
+        data = json.loads(PLANTILLAS_JSON_PATH.read_text(encoding="utf-8"))
+        return data.get("plantillas", {})
+    except Exception as exc:
+        logger.warning("No se pudo leer plantillas JSON (%s), uso internas", exc)
+        return PLANTILLAS_OUTREACH
+
+
+def generar_email_outreach(prospecto: dict) -> dict:
+    """
+    Genera el email de outreach para un prospecto.
+
+    Con ANTHROPIC_API_KEY u OPENAI_API_KEY personaliza con LLM; sin keys usa
+    las plantillas de opc/data/plantillas_email_outreach.json sustituyendo
+    [EMPRESA]/[HOTEL].
+
+    Devuelve {"modo": ..., "asunto": ..., "cuerpo": ...}
+    """
+    nombre = prospecto.get("nombre_empresa", "su empresa")
+    tipo = prospecto.get("tipo_empresa", "Corporativo_Otro")
+    plantillas = _cargar_plantillas_json()
+    plantilla = plantillas.get(tipo) or plantillas.get("Corporativo_Otro") or \
+        PLANTILLAS_OUTREACH["Corporativo_Otro"]
+
+    # Intento LLM (personalización real)
+    try:
+        from opc.agente_social import _generar_texto_llm
+        if os.getenv("ANTHROPIC_API_KEY") or os.getenv("OPENAI_API_KEY"):
+            prompt = (
+                "Eres Noe Vásquez, dueño de Emovils (transporte ejecutivo RD, "
+                "14 años, WhatsApp 829-861-0090, emovils.com). Personaliza este "
+                f"email cold para la empresa '{nombre}' (tipo: {tipo}, ciudad: "
+                f"{prospecto.get('ciudad', 'RD')}). Mantén el tono y los bullets, "
+                "máximo 180 palabras. Responde SOLO con un JSON: "
+                '{"asunto": "...", "cuerpo": "..."}\n\nPLANTILLA BASE:\n'
+                f"Asunto: {plantilla['asunto']}\n\n{plantilla['cuerpo']}"
+            )
+            respuesta = _generar_texto_llm(prompt, max_tokens=1000)
+            if respuesta:
+                try:
+                    inicio = respuesta.index("{")
+                    fin = respuesta.rindex("}") + 1
+                    parsed = json.loads(respuesta[inicio:fin])
+                    if parsed.get("asunto") and parsed.get("cuerpo"):
+                        return {
+                            "modo": "llm",
+                            "tipo_plantilla": tipo,
+                            "asunto": parsed["asunto"],
+                            "cuerpo": parsed["cuerpo"],
+                        }
+                except (ValueError, json.JSONDecodeError):
+                    logger.warning("LLM devolvió JSON inválido, uso plantilla")
+    except Exception as exc:
+        logger.warning("LLM no disponible para outreach: %s", exc)
+
+    # Plantilla con sustitución simple
+    cuerpo = plantilla["cuerpo"].replace("[EMPRESA]", nombre).replace("[HOTEL]", nombre)
+    asunto = plantilla["asunto"].replace("[EMPRESA]", nombre)
+    return {
+        "modo": "plantilla",
+        "tipo_plantilla": tipo,
+        "asunto": asunto,
+        "cuerpo": cuerpo,
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# GUARDAR EN PIPELINE_COMERCIAL (con modo mock)
+# ─────────────────────────────────────────────────────────────
+
+def guardar_en_pipeline(prospectos: list[dict]) -> dict:
+    """
+    Inserta prospectos (dicts) en Airtable Pipeline_Comercial, evitando
+    duplicados por Empresa_nombre. Sin credenciales Airtable devuelve
+    resultado mock con el conteo simulado.
+    """
+    try:
+        api = AirtableOPC()
+    except Exception as exc:
+        logger.warning("Pipeline en modo mock (sin Airtable): %s", exc)
+        return {
+            "modo": "mock",
+            "guardados": 0,
+            "simulados": len(prospectos),
+            "mensaje": "Sin credenciales Airtable; prospectos no persistidos.",
+        }
+
+    creados = 0
+    duplicados = 0
+    errores = 0
+    for p in prospectos:
+        try:
+            nombre = p.get("nombre_empresa", "")
+            if not nombre:
+                continue
+            if api.buscar_por_campo("Pipeline_Comercial", "Empresa_nombre", nombre):
+                duplicados += 1
+                continue
+            api.crear_registro("Pipeline_Comercial", {
+                "Empresa_nombre": nombre,
+                "Tipo_empresa": p.get("tipo_empresa", "Corporativo_Otro"),
+                "Fuente_scraping": p.get("fuente_scraping", "Manual"),
+                "Contacto_principal": p.get("contacto_principal", ""),
+                "Cargo": p.get("cargo", ""),
+                "Email": p.get("email", ""),
+                "LinkedIn_url": p.get("linkedin_url", ""),
+                "WhatsApp": p.get("whatsapp", ""),
+                "Estado_pipeline": p.get("estado_pipeline", "NUEVO"),
+                "Score_calificacion": int(p.get("score", 50)),
+                "Fecha_primer_contacto": datetime.now().isoformat(timespec="seconds"),
+                "Notas": f"{p.get('razon_potencial', '')} · "
+                         f"Ciudad: {p.get('ciudad', '')} · {p.get('notas', '')}",
+            })
+            creados += 1
+        except Exception as exc:
+            errores += 1
+            logger.error("Error guardando %s: %s", p.get("nombre_empresa"), exc)
+
+    return {
+        "modo": "real",
+        "guardados": creados,
+        "duplicados": duplicados,
+        "errores": errores,
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# PIPELINE COMPLETO (buscar → enriquecer → email → guardar)
+# ─────────────────────────────────────────────────────────────
+
+def ejecutar_pipeline_prospeccion(
+    fuente: str = "google_maps",
+    busqueda: str | None = None,
+    max_resultados: int = 10,
+    generar_emails: bool = True,
+    guardar: bool = True,
+) -> dict:
+    """Corre el pipeline completo de prospección. Nunca falla sin tokens."""
+    resultado_busqueda = buscar_prospectos(fuente, busqueda, max_resultados)
+    prospectos = [enriquecer_prospecto(p) for p in resultado_busqueda["prospectos"]]
+
+    emails: list[dict] = []
+    if generar_emails:
+        for p in prospectos:
+            correo = generar_email_outreach(p)
+            correo["empresa"] = p.get("nombre_empresa", "")
+            emails.append(correo)
+
+    resultado_guardado = guardar_en_pipeline(prospectos) if guardar else \
+        {"modo": "skip", "guardados": 0}
+
+    modo = "real" if (
+        resultado_busqueda["modo"] == "real" or resultado_guardado.get("modo") == "real"
+    ) else "mock"
+    return {
+        "modo": modo,
+        "busqueda": resultado_busqueda,
+        "prospectos_enriquecidos": prospectos,
+        "emails_outreach": emails,
+        "pipeline_airtable": resultado_guardado,
+    }
+
+
+# ─────────────────────────────────────────────────────────────
 # CARGA EN AIRTABLE PIPELINE_COMERCIAL
 # ─────────────────────────────────────────────────────────────
 
@@ -431,24 +777,40 @@ if __name__ == "__main__":
     for tipo, count in sorted(por_tipo.items(), key=lambda x: x[1], reverse=True):
         print(f"  • {tipo}: {count}")
 
-    # Guardar en Airtable
-    print("\n💾 Guardando en Airtable Pipeline_Comercial...")
-    creados = guardar_prospects_en_airtable(prospects)
-    print(f"  ✓ {creados} prospects nuevos cargados (los duplicados se ignoraron)")
+    # Pipeline completo (funciona con o sin tokens)
+    print("\n🚀 Pipeline de prospección (buscar → enriquecer → email → guardar):")
+    resultado = ejecutar_pipeline_prospeccion(max_resultados=3, guardar=False)
+    print(f"  Modo: {resultado['modo']} · Fuente: {resultado['busqueda']['fuente']}")
+    for p in resultado["prospectos_enriquecidos"]:
+        print(f"  • {p['nombre_empresa']} ({p['tipo_empresa']}) · "
+              f"score {p['score']} · {p['email']}")
+    if resultado["emails_outreach"]:
+        primer = resultado["emails_outreach"][0]
+        print(f"\n  📧 Email ejemplo [{primer['modo']}]: {primer['asunto']}")
+
+    # Guardar en Airtable (modo mock si no hay credenciales)
+    print("\n💾 Guardando semilla en Airtable Pipeline_Comercial...")
+    res_guardado = guardar_en_pipeline([asdict(p) for p in prospects])
+    print(f"  Resultado: {res_guardado}")
 
     # Mostrar plantillas disponibles
     print("\n📧 Plantillas email outreach disponibles:")
     for tipo in PLANTILLAS_OUTREACH.keys():
         print(f"  • {tipo}")
 
-    # Resumen
-    resumen = resumen_pipeline()
-    print(f"\n📊 PIPELINE COMERCIAL ACTUAL:")
-    print(f"  Total: {resumen['total_prospects']} prospects")
-    print(f"  Por estado: {resumen['por_estado']}")
+    # Resumen (solo si hay Airtable)
+    try:
+        resumen = resumen_pipeline()
+        print(f"\n📊 PIPELINE COMERCIAL ACTUAL:")
+        print(f"  Total: {resumen['total_prospects']} prospects")
+        print(f"  Por estado: {resumen['por_estado']}")
+    except Exception as e:
+        print(f"\n📊 Pipeline no consultable (sin Airtable): {e}")
 
     print()
     print("=" * 70)
     print("✓ Agente Prospector operativo")
-    print(f"🔗 Ver en Airtable: https://airtable.com/{os.environ['AIRTABLE_BASE_ID']}")
+    base_id = os.environ.get("AIRTABLE_BASE_ID", "")
+    if base_id:
+        print(f"🔗 Ver en Airtable: https://airtable.com/{base_id}")
     print("=" * 70)

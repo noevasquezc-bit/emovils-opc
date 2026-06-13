@@ -26,12 +26,15 @@ import os
 import smtplib
 import ssl
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from email.message import EmailMessage
 from email.utils import parseaddr, parsedate_to_datetime
 from pathlib import Path
 from typing import Optional
+
+import requests
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -191,19 +194,13 @@ class EmailSaliente:
     adjuntos: list[Path] = field(default_factory=list)
 
 
-def enviar_email(envio: EmailSaliente) -> bool:
-    """Envia via SMTP Hostinger SSL. Devuelve True si exitoso."""
-    buzon = BUZONES.get(envio.desde_buzon)
-    if not buzon:
-        logger.error("Buzon desconocido: %s", envio.desde_buzon)
-        return False
+# Reintentos con backoff exponencial (mismo patrón que airtable_api_opc)
+MAX_RETRIES = 3
+RETRY_BACKOFF_SECS = 1.5
 
-    smtp_user = buzon["direccion"]
-    smtp_pass = os.getenv("EMAIL_SMTP_PASS", "")
-    if not smtp_pass:
-        logger.error("EMAIL_SMTP_PASS no configurada en .env")
-        return False
 
+def _construir_mensaje(envio: EmailSaliente, buzon: dict) -> EmailMessage:
+    """Arma el EmailMessage MIME para envío SMTP."""
     msg = EmailMessage()
     msg["From"] = buzon["from_name"]
     msg["To"] = envio.para
@@ -224,28 +221,153 @@ def enviar_email(envio: EmailSaliente) -> bool:
                 data, maintype="application", subtype="octet-stream",
                 filename=ruta.name,
             )
+    return msg
 
-    destinatarios = [envio.para] + envio.cc + envio.bcc
-    try:
-        ctx = ssl.create_default_context()
-        if SMTP_SECURITY == "STARTTLS":
-            # Microsoft 365 con GoDaddy → puerto 587
-            with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-                server.ehlo()
-                server.starttls(context=ctx)
-                server.ehlo()
-                server.login(smtp_user, smtp_pass)
-                server.send_message(msg, to_addrs=destinatarios)
-        else:
-            # GoDaddy Workspace Email (SSL) → puerto 465
-            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=ctx) as server:
-                server.login(smtp_user, smtp_pass)
-                server.send_message(msg, to_addrs=destinatarios)
-        logger.info("✓ Email enviado: %s → %s [%s]", smtp_user, envio.para, envio.asunto)
-        return True
-    except Exception as exc:
-        logger.exception("Fallo SMTP: %s", exc)
+
+def _enviar_via_resend(envio: EmailSaliente, buzon: dict) -> bool:
+    """
+    Envia via Resend API (https://resend.com). Retry con backoff en
+    rate limit (429), errores 5xx y excepciones de red.
+    """
+    api_key = os.getenv("RESEND_API_KEY", "")
+    if not api_key:
         return False
+
+    payload: dict = {
+        "from": buzon["from_name"],
+        "to": [envio.para],
+        "subject": envio.asunto,
+        "text": envio.cuerpo_texto,
+    }
+    if envio.cuerpo_html:
+        payload["html"] = envio.cuerpo_html
+    if envio.cc:
+        payload["cc"] = envio.cc
+    if envio.bcc:
+        payload["bcc"] = envio.bcc
+    if envio.reply_to:
+        payload["reply_to"] = envio.reply_to
+    if envio.adjuntos:
+        import base64
+        payload["attachments"] = [
+            {
+                "filename": ruta.name,
+                "content": base64.b64encode(ruta.read_bytes()).decode(),
+            }
+            for ruta in envio.adjuntos if ruta.exists()
+        ]
+
+    for intento in range(MAX_RETRIES):
+        try:
+            r = requests.post(
+                "https://api.resend.com/emails",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=30,
+            )
+            if r.status_code == 429 or 500 <= r.status_code < 600:
+                wait = RETRY_BACKOFF_SECS * (2 ** intento)
+                logger.warning("Resend %s. Reintentando en %.1fs...", r.status_code, wait)
+                time.sleep(wait)
+                continue
+            if not r.ok:
+                logger.error("Resend rechazó el envío %s: %s", r.status_code, r.text[:200])
+                return False
+            logger.info("✓ Email enviado via Resend: %s → %s [%s]",
+                        buzon["direccion"], envio.para, envio.asunto)
+            return True
+        except requests.RequestException as exc:
+            wait = RETRY_BACKOFF_SECS * (2 ** intento)
+            logger.warning("Excepción Resend: %s. Reintentando en %.1fs...", exc, wait)
+            time.sleep(wait)
+    logger.error("Resend falló después de %d reintentos", MAX_RETRIES)
+    return False
+
+
+def _enviar_via_smtp(envio: EmailSaliente, buzon: dict) -> bool:
+    """Envia via SMTP (Banahosting/cPanel SSL) con retry y backoff."""
+    smtp_user = os.getenv("EMAIL_SMTP_USER", "") or buzon["direccion"]
+    smtp_pass = os.getenv("EMAIL_SMTP_PASS", "")
+    if not smtp_pass:
+        logger.info(
+            "EMAIL_SMTP_PASS no configurada — envío SMTP omitido (modo mock). "
+            "Email NO enviado: %s → %s [%s]",
+            buzon["direccion"], envio.para, envio.asunto,
+        )
+        return False
+
+    msg = _construir_mensaje(envio, buzon)
+    destinatarios = [envio.para] + envio.cc + envio.bcc
+
+    for intento in range(MAX_RETRIES):
+        try:
+            ctx = ssl.create_default_context()
+            if SMTP_SECURITY == "STARTTLS":
+                # Microsoft 365 / Gmail Workspace → puerto 587
+                with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as server:
+                    server.ehlo()
+                    server.starttls(context=ctx)
+                    server.ehlo()
+                    server.login(smtp_user, smtp_pass)
+                    server.send_message(msg, to_addrs=destinatarios)
+            else:
+                # cPanel / Hostinger SSL → puerto 465
+                with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=ctx, timeout=30) as server:
+                    server.login(smtp_user, smtp_pass)
+                    server.send_message(msg, to_addrs=destinatarios)
+            logger.info("✓ Email enviado via SMTP: %s → %s [%s]",
+                        smtp_user, envio.para, envio.asunto)
+            return True
+        except smtplib.SMTPAuthenticationError as exc:
+            # Credenciales malas: reintentar no ayuda
+            logger.error("SMTP auth falló (revisar EMAIL_SMTP_USER/PASS): %s", exc)
+            return False
+        except Exception as exc:
+            wait = RETRY_BACKOFF_SECS * (2 ** intento)
+            logger.warning("Fallo SMTP intento %d/%d: %s. Reintentando en %.1fs...",
+                           intento + 1, MAX_RETRIES, exc, wait)
+            time.sleep(wait)
+    logger.error("SMTP falló después de %d reintentos", MAX_RETRIES)
+    return False
+
+
+def enviar_email(envio: EmailSaliente) -> bool:
+    """
+    Envia un email corporativo. Estrategia:
+      1. Resend API (RESEND_API_KEY) — primario, mejor entregabilidad
+      2. SMTP (EMAIL_SMTP_PASS) — fallback
+      3. Sin credenciales → skip limpio con log claro (modo mock), False.
+
+    Devuelve True si el envío fue exitoso por cualquiera de las dos vías.
+    """
+    buzon = BUZONES.get(envio.desde_buzon)
+    if not buzon:
+        logger.error("Buzon desconocido: %s", envio.desde_buzon)
+        return False
+
+    tiene_resend = bool(os.getenv("RESEND_API_KEY"))
+    tiene_smtp = bool(os.getenv("EMAIL_SMTP_PASS"))
+
+    if not tiene_resend and not tiene_smtp:
+        logger.info(
+            "📧 [MOCK] Sin RESEND_API_KEY ni EMAIL_SMTP_PASS — email simulado: "
+            "%s → %s [%s]", buzon["direccion"], envio.para, envio.asunto,
+        )
+        return False
+
+    if tiene_resend:
+        if _enviar_via_resend(envio, buzon):
+            return True
+        if tiene_smtp:
+            logger.warning("Resend falló, intentando fallback SMTP...")
+
+    if tiene_smtp:
+        return _enviar_via_smtp(envio, buzon)
+
+    return False
 
 
 # ─────────────────────────────────────────────────────────────
@@ -305,50 +427,69 @@ class CorreoEntrante:
 
 
 def leer_buzon_imap(buzon: str, max_correos: int = 20) -> list[CorreoEntrante]:
-    """Conecta IMAP y lee correos NO LEIDOS del buzon."""
+    """
+    Conecta IMAP y lee correos NO LEIDOS del buzon.
+    Retry con backoff en fallos de conexión; skip limpio sin credenciales.
+    """
     cfg = BUZONES.get(buzon)
     if not cfg:
+        logger.error("Buzon desconocido para IMAP: %s", buzon)
         return []
 
     direccion = cfg["direccion"]
     password = os.getenv("EMAIL_SMTP_PASS", "")
     if not password:
-        logger.warning("Sin password SMTP, no se puede leer IMAP")
+        logger.info(
+            "📬 [MOCK] Sin EMAIL_SMTP_PASS — lectura IMAP de %s omitida", direccion
+        )
         return []
 
     correos: list[CorreoEntrante] = []
-    try:
-        with imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT) as imap:
-            imap.login(direccion, password)
-            imap.select("INBOX")
-            status, data = imap.search(None, "UNSEEN")
-            if status != "OK":
-                return []
-            ids = data[0].split()[-max_correos:]
-            for uid in ids:
-                status, msg_data = imap.fetch(uid, "(RFC822)")
+    for intento in range(MAX_RETRIES):
+        try:
+            with imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT) as imap:
+                imap.login(direccion, password)
+                imap.select("INBOX")
+                status, data = imap.search(None, "UNSEEN")
                 if status != "OK":
-                    continue
-                msg = email.message_from_bytes(msg_data[0][1])
-                asunto = msg.get("Subject", "")
-                remitente = parseaddr(msg.get("From", ""))[1]
-                try:
-                    fecha = parsedate_to_datetime(msg.get("Date", ""))
-                except Exception:
-                    fecha = datetime.now()
-                cuerpo = ""
-                if msg.is_multipart():
-                    for part in msg.walk():
-                        if part.get_content_type() == "text/plain":
-                            cuerpo += part.get_payload(decode=True).decode(errors="ignore")
-                else:
-                    cuerpo = msg.get_payload(decode=True).decode(errors="ignore")
-                correos.append(CorreoEntrante(
-                    uid=uid.decode(), buzon=buzon, remitente=remitente,
-                    asunto=asunto, cuerpo=cuerpo, fecha=fecha,
-                ))
-    except Exception as exc:
-        logger.exception("Error IMAP en %s: %s", buzon, exc)
+                    logger.warning("IMAP search devolvió %s en %s", status, buzon)
+                    return []
+                ids = data[0].split()[-max_correos:]
+                for uid in ids:
+                    status, msg_data = imap.fetch(uid, "(RFC822)")
+                    if status != "OK":
+                        logger.warning("IMAP fetch %s falló en %s", uid, buzon)
+                        continue
+                    msg = email.message_from_bytes(msg_data[0][1])
+                    asunto = msg.get("Subject", "")
+                    remitente = parseaddr(msg.get("From", ""))[1]
+                    try:
+                        fecha = parsedate_to_datetime(msg.get("Date", ""))
+                    except Exception:
+                        fecha = datetime.now()
+                    cuerpo = ""
+                    if msg.is_multipart():
+                        for part in msg.walk():
+                            if part.get_content_type() == "text/plain":
+                                cuerpo += part.get_payload(decode=True).decode(errors="ignore")
+                    else:
+                        cuerpo = msg.get_payload(decode=True).decode(errors="ignore")
+                    correos.append(CorreoEntrante(
+                        uid=uid.decode(), buzon=buzon, remitente=remitente,
+                        asunto=asunto, cuerpo=cuerpo, fecha=fecha,
+                    ))
+            logger.info("📬 IMAP %s: %d correos no leídos", direccion, len(correos))
+            return correos
+        except imaplib.IMAP4.error as exc:
+            # Error de protocolo/login: reintentar no ayuda
+            logger.error("IMAP login/protocolo falló en %s: %s", buzon, exc)
+            return []
+        except Exception as exc:
+            wait = RETRY_BACKOFF_SECS * (2 ** intento)
+            logger.warning("Fallo IMAP %s intento %d/%d: %s. Reintentando en %.1fs...",
+                           buzon, intento + 1, MAX_RETRIES, exc, wait)
+            time.sleep(wait)
+    logger.error("IMAP %s falló después de %d reintentos", buzon, MAX_RETRIES)
     return correos
 
 

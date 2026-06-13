@@ -27,9 +27,14 @@ logger = logging.getLogger(__name__)
 
 OUTPUT_DIR = Path(os.getenv(
     "EMOVILS_VIDEOS_DIR",
-    "/Users/noevasquez/Desktop/PROYECTO OPC/emovils-opc/opc/videos"
+    str(Path(__file__).resolve().parent / "videos"),
 ))
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+try:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+except OSError:
+    # Ruta no escribible en este entorno → fallback local junto al módulo
+    OUTPUT_DIR = Path(__file__).resolve().parent / "videos"
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class HiggsfieldError(Exception):

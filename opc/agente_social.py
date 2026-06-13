@@ -15,6 +15,7 @@ Funciones:
 Sin token: modo MOCK que prepara TODO listo y muestra al dueño.
 """
 from __future__ import annotations
+import json
 import logging
 import os
 import sys
@@ -22,6 +23,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
+
+import requests
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -441,6 +444,413 @@ def guardar_reel_en_airtable(api: AirtableOPC, reel: ReelProgramado) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────
+# PLAN SEMANAL DE CONTENIDO (captions + imágenes + hashtags)
+# ─────────────────────────────────────────────────────────────
+
+# Tabla Airtable usada como cola de aprobación de posts del dueño.
+TABLA_POSTS = "Email_Campañas"
+ESTADO_PENDIENTE_APROBACION = "Pendiente_Aprobacion"
+
+META_GRAPH_BASE = "https://graph.facebook.com/v19.0"
+
+# Plantillas de respaldo (modo sin LLM): 7 días de contenido listo.
+PLANTILLAS_SEMANA = [
+    {
+        "dia": "Lunes",
+        "tema": "Transfer AILA → Casa de Campo",
+        "caption": (
+            "Empieza la semana sin estrés. Tu transfer de AILA a Casa de Campo "
+            "con Emovils: chofer uniformado, van ejecutiva, agua fría y Wi-Fi. "
+            "14 años haciéndolo bien. 📲 829-861-0090"
+        ),
+        "descripcion_imagen": (
+            "Van ejecutiva Hyundai H1 negra estacionada frente al portón de "
+            "Casa de Campo al atardecer, chofer uniformado abriendo la puerta."
+        ),
+        "hashtags": "#EmovilsRD #CasaDeCampo #VIPTransfer #LaRomana #TurismoRD",
+    },
+    {
+        "dia": "Martes",
+        "tema": "Detrás de cámaras: preparación del vehículo",
+        "caption": (
+            "Mientras tú vuelas, nosotros preparamos todo: limpieza profunda, "
+            "agua en cada asiento, cargadores y tracking de tu vuelo en tiempo "
+            "real. Tu viaje empieza antes de que llegues. 🚖"
+        ),
+        "descripcion_imagen": (
+            "Close-up de manos con guante blanco colocando botellas de agua en "
+            "los asientos de cuero de una van ejecutiva impecable."
+        ),
+        "hashtags": "#BehindTheScenes #TransporteEjecutivo #EmovilsRD #ServicioPremium",
+    },
+    {
+        "dia": "Miércoles",
+        "tema": "Servicio nocturno corporativo (call centers)",
+        "caption": (
+            "50 empleados a salvo cada noche. Transporte corporativo nocturno "
+            "con choferes verificados y reporte de cumplimiento cada mañana. "
+            "Cotiza para tu empresa: 829-861-0090"
+        ),
+        "descripcion_imagen": (
+            "Van Emovils iluminada frente a un edificio de call center de noche "
+            "en Santo Domingo, empleadas subiendo tranquilas."
+        ),
+        "hashtags": "#TransporteCorporativo #CallCenterRD #SantoDomingo #SeguridadLaboral",
+    },
+    {
+        "dia": "Jueves",
+        "tema": "Tracking de vuelo en tiempo real",
+        "caption": (
+            "Sabemos cuándo aterrizas antes de que salgas del avión. ✈️ "
+            "Tracking de vuelo en tiempo real: si tu vuelo se retrasa, te "
+            "esperamos sin costo extra. Así de simple."
+        ),
+        "descripcion_imagen": (
+            "Chofer profesional en la sala de llegadas del AILA sosteniendo un "
+            "cartel con nombre de cliente, celular con app de vuelos en mano."
+        ),
+        "hashtags": "#AILA #SDQ #TrackingDeVuelo #TransporteEjecutivoRD #EmovilsRD",
+    },
+    {
+        "dia": "Viernes",
+        "tema": "Eventos y bodas",
+        "caption": (
+            "Tu boda o evento corporativo sin preocupaciones de transporte. "
+            "Flota de vans ejecutivas, choferes uniformados y coordinación "
+            "completa. Cotiza tu fecha: 829-861-0090 🥂"
+        ),
+        "descripcion_imagen": (
+            "Tres vans negras Emovils alineadas frente a un salón de eventos "
+            "decorado con luces cálidas, novia subiendo a la primera van."
+        ),
+        "hashtags": "#BodasRD #EventosRD #TransporteParaBodas #EmovilsEventos",
+    },
+    {
+        "dia": "Sábado",
+        "tema": "Testimonio / prueba social",
+        "caption": (
+            "\"El chofer ya estaba esperándome con mi nombre en el cartel. "
+            "Cero estrés después de 8 horas de vuelo.\" — Cliente VIP, Punta "
+            "Cana. 14 años de clientes que vuelven. 🙏"
+        ),
+        "descripcion_imagen": (
+            "Cliente sonriente con maletas saliendo del aeropuerto, chofer "
+            "Emovils recibiéndolo con cartel personalizado."
+        ),
+        "hashtags": "#Testimonios #ClientesFelices #PuntaCana #EmovilsRD",
+    },
+    {
+        "dia": "Domingo",
+        "tema": "Cierre de semana con CTA",
+        "caption": (
+            "¿Viajas esta semana? Reserva tu transfer antes de aterrizar y "
+            "llega tranquilo. WhatsApp 829-861-0090 · emovils.com 🚖✨"
+        ),
+        "descripcion_imagen": (
+            "Logo 'e' de Emovils sobre fondo de carretera dominicana con "
+            "palmeras al atardecer, van ejecutiva en movimiento."
+        ),
+        "hashtags": "#ReservaYa #Emovils #TransporteEjecutivoRD #RD",
+    },
+]
+
+
+def _generar_texto_llm(prompt: str, max_tokens: int = 2500) -> str | None:
+    """
+    Genera texto con Anthropic (preferido) u OpenAI vía REST (sin SDK).
+    Devuelve None si no hay API key o si la llamada falla (→ modo plantillas).
+    """
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+    openai_key = os.getenv("OPENAI_API_KEY", "")
+
+    if anthropic_key:
+        try:
+            r = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": anthropic_key,
+                    "anthropic-version": "2023-06-01",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": os.getenv("CLAUDE_MODEL", "claude-sonnet-4-20250514"),
+                    "max_tokens": max_tokens,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+                timeout=60,
+            )
+            if r.ok:
+                return r.json()["content"][0]["text"]
+            logger.warning("Anthropic %s: %s", r.status_code, r.text[:200])
+        except Exception as exc:
+            logger.warning("Fallo Anthropic: %s", exc)
+
+    if openai_key:
+        try:
+            r = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {openai_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                    "max_tokens": max_tokens,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+                timeout=60,
+            )
+            if r.ok:
+                return r.json()["choices"][0]["message"]["content"]
+            logger.warning("OpenAI %s: %s", r.status_code, r.text[:200])
+        except Exception as exc:
+            logger.warning("Fallo OpenAI: %s", exc)
+
+    return None
+
+
+def _extraer_json(texto: str) -> list | None:
+    """Extrae el primer array JSON de una respuesta de LLM."""
+    try:
+        inicio = texto.index("[")
+        fin = texto.rindex("]") + 1
+        return json.loads(texto[inicio:fin])
+    except (ValueError, json.JSONDecodeError):
+        return None
+
+
+def _plan_con_llm(fecha_inicio: date) -> list[dict] | None:
+    """Pide al LLM un plan de 7 días. None si no hay key o falla."""
+    prompt = (
+        "Eres el community manager de Emovils, empresa dominicana de transporte "
+        "ejecutivo (transfers AILA, Casa de Campo, Punta Cana; servicio nocturno "
+        "para call centers; 14 años de operación; WhatsApp 829-861-0090; "
+        "emovils.com). Genera un plan de contenido de 7 días para Instagram y "
+        "Facebook empezando el "
+        f"{fecha_inicio.isoformat()}.\n\n"
+        "Responde SOLO con un array JSON de 7 objetos, cada uno con las llaves: "
+        '"dia" (Lunes..Domingo), "tema", "caption" (español dominicano cercano, '
+        "máx 350 caracteres, con CTA), \"descripcion_imagen\" (descripción "
+        'detallada de la imagen a producir) y "hashtags" (5-6 hashtags).'
+    )
+    respuesta = _generar_texto_llm(prompt)
+    if not respuesta:
+        return None
+    plan = _extraer_json(respuesta)
+    if not plan or len(plan) < 7:
+        logger.warning("LLM devolvió plan inválido, usando plantillas")
+        return None
+    return plan[:7]
+
+
+def planificar_semana(
+    fecha_inicio: date | str | None = None,
+    guardar_airtable: bool = True,
+) -> dict:
+    """
+    Genera el plan de contenido de 7 días (caption + descripción de imagen +
+    hashtags por día) y lo guarda en Airtable como cola de aprobación
+    (estado Pendiente_Aprobacion).
+
+    Con ANTHROPIC_API_KEY u OPENAI_API_KEY genera contenido fresco con LLM;
+    sin keys usa las plantillas locales (modo mock, nunca falla).
+    """
+    if fecha_inicio is None:
+        fecha_inicio = date.today()
+    elif isinstance(fecha_inicio, str):
+        fecha_inicio = date.fromisoformat(fecha_inicio)
+
+    plan_llm = _plan_con_llm(fecha_inicio)
+    generado_con = "llm" if plan_llm else "plantillas"
+    base = plan_llm or PLANTILLAS_SEMANA
+
+    posts: list[dict] = []
+    for i, item in enumerate(base):
+        fecha_post = fecha_inicio + timedelta(days=i)
+        posts.append({
+            "fecha": fecha_post.isoformat(),
+            "dia": item.get("dia", fecha_post.strftime("%A")),
+            "tema": item.get("tema", ""),
+            "caption": item.get("caption", ""),
+            "descripcion_imagen": item.get("descripcion_imagen", ""),
+            "hashtags": item.get("hashtags", ""),
+            "estado": ESTADO_PENDIENTE_APROBACION,
+            "plataformas": ["INSTAGRAM", "FACEBOOK"],
+        })
+
+    # Cola de aprobación en Airtable (si hay credenciales)
+    guardados = 0
+    airtable_ids: list[str] = []
+    error_airtable = ""
+    if guardar_airtable:
+        try:
+            api = AirtableOPC()
+            for post in posts:
+                record = api.crear_registro(TABLA_POSTS, {
+                    "Campaña": "Plan_Semanal_Social",
+                    "Asunto": f"POST {post['dia']} · {post['tema']}",
+                    "Cuerpo": (
+                        f"CAPTION:\n{post['caption']}\n\n"
+                        f"IMAGEN:\n{post['descripcion_imagen']}\n\n"
+                        f"HASHTAGS: {post['hashtags']}\n\n"
+                        f"PLATAFORMAS: {', '.join(post['plataformas'])}"
+                    ),
+                    "Fecha_envio": f"{post['fecha']}T12:00:00",
+                    "Estado": ESTADO_PENDIENTE_APROBACION,
+                    "Plataforma": "Manual",
+                })
+                post["airtable_id"] = record.get("id", "")
+                airtable_ids.append(post["airtable_id"])
+                guardados += 1
+        except Exception as exc:
+            error_airtable = str(exc)
+            logger.warning("Sin Airtable, plan no persistido: %s", exc)
+
+    modo = "real" if (plan_llm or guardados) else "mock"
+    resultado = {
+        "modo": modo,
+        "generado_con": generado_con,
+        "fecha_inicio": fecha_inicio.isoformat(),
+        "total_posts": len(posts),
+        "guardados_airtable": guardados,
+        "posts": posts,
+    }
+    if error_airtable:
+        resultado["nota_airtable"] = f"No persistido en Airtable: {error_airtable[:150]}"
+    return resultado
+
+
+# ─────────────────────────────────────────────────────────────
+# PUBLICACIÓN VÍA META GRAPH API (Facebook Page + Instagram)
+# ─────────────────────────────────────────────────────────────
+
+def _meta_configurado() -> bool:
+    return bool(
+        os.getenv("META_ACCESS_TOKEN")
+        and (os.getenv("META_PAGE_ID") or os.getenv("META_IG_USER_ID"))
+    )
+
+
+def publicar_post(post: dict) -> dict:
+    """
+    Publica un post aprobado en Facebook Page e Instagram vía Meta Graph API.
+
+    post: {"caption": str, "hashtags": str, "image_url": str opcional}
+
+    Con META_ACCESS_TOKEN + META_PAGE_ID/META_IG_USER_ID hace la llamada HTTP
+    real; sin tokens devuelve resultado mock (nunca falla).
+    """
+    caption = (post.get("caption") or "").strip()
+    hashtags = (post.get("hashtags") or "").strip()
+    mensaje = f"{caption}\n\n{hashtags}".strip()
+    image_url = post.get("image_url", "")
+
+    if not mensaje:
+        return {"modo": "error", "error": "El post no tiene caption"}
+
+    if not _meta_configurado():
+        logger.info("📢 [MOCK] Post listo para publicar (sin tokens Meta): %s", caption[:60])
+        return {
+            "modo": "mock",
+            "mensaje": "Tokens Meta no configurados (META_ACCESS_TOKEN + "
+                       "META_PAGE_ID/META_IG_USER_ID). Post simulado.",
+            "post_preparado": {"texto": mensaje, "image_url": image_url},
+            "publicado_facebook": False,
+            "publicado_instagram": False,
+        }
+
+    token = os.getenv("META_ACCESS_TOKEN", "")
+    page_id = os.getenv("META_PAGE_ID", "")
+    ig_user_id = os.getenv("META_IG_USER_ID", "")
+    resultados: dict = {"modo": "real", "facebook": None, "instagram": None}
+
+    # Facebook Page: /feed (texto) o /photos (con imagen)
+    if page_id:
+        try:
+            if image_url:
+                url = f"{META_GRAPH_BASE}/{page_id}/photos"
+                payload = {"url": image_url, "caption": mensaje, "access_token": token}
+            else:
+                url = f"{META_GRAPH_BASE}/{page_id}/feed"
+                payload = {"message": mensaje, "access_token": token}
+            r = requests.post(url, data=payload, timeout=30)
+            resultados["facebook"] = r.json() if r.ok else {"error": r.text[:200]}
+        except Exception as exc:
+            resultados["facebook"] = {"error": str(exc)}
+
+    # Instagram: requiere imagen → contenedor de media + publish
+    if ig_user_id:
+        if not image_url:
+            resultados["instagram"] = {
+                "skipped": "Instagram requiere image_url; post solo-texto no soportado"
+            }
+        else:
+            try:
+                r1 = requests.post(
+                    f"{META_GRAPH_BASE}/{ig_user_id}/media",
+                    data={"image_url": image_url, "caption": mensaje, "access_token": token},
+                    timeout=30,
+                )
+                contenedor = r1.json().get("id") if r1.ok else None
+                if contenedor:
+                    r2 = requests.post(
+                        f"{META_GRAPH_BASE}/{ig_user_id}/media_publish",
+                        data={"creation_id": contenedor, "access_token": token},
+                        timeout=30,
+                    )
+                    resultados["instagram"] = r2.json() if r2.ok else {"error": r2.text[:200]}
+                else:
+                    resultados["instagram"] = {"error": r1.text[:200]}
+            except Exception as exc:
+                resultados["instagram"] = {"error": str(exc)}
+
+    resultados["publicado_facebook"] = bool(
+        resultados.get("facebook") and "error" not in (resultados["facebook"] or {})
+    )
+    resultados["publicado_instagram"] = bool(
+        resultados.get("instagram") and "error" not in (resultados["instagram"] or {})
+        and "skipped" not in (resultados["instagram"] or {})
+    )
+    return resultados
+
+
+def procesar_aprobacion(post_id: str, aprobado: bool) -> dict:
+    """
+    Procesa la decisión del dueño sobre un post en cola.
+
+    post_id: record id de Airtable (tabla Email_Campañas).
+    aprobado: True → estado Aprobado (listo para publicar);
+              False → estado Rechazado.
+
+    Sin Airtable configurado devuelve resultado mock.
+    """
+    nuevo_estado = "Aprobado" if aprobado else "Rechazado"
+    try:
+        api = AirtableOPC()
+        registro = api.actualizar(TABLA_POSTS, post_id, {"Estado": nuevo_estado})
+        fields = registro.get("fields", {})
+        return {
+            "modo": "real",
+            "post_id": post_id,
+            "aprobado": aprobado,
+            "estado": nuevo_estado,
+            "post": {
+                "asunto": fields.get("Asunto", ""),
+                "caption": fields.get("Cuerpo", ""),
+            },
+        }
+    except Exception as exc:
+        logger.warning("Aprobación en modo mock (sin Airtable): %s", exc)
+        return {
+            "modo": "mock",
+            "post_id": post_id,
+            "aprobado": aprobado,
+            "estado": nuevo_estado,
+            "mensaje": "Sin credenciales Airtable; aprobación simulada.",
+        }
+
+
+# ─────────────────────────────────────────────────────────────
 # CLI DE PRUEBA
 # ─────────────────────────────────────────────────────────────
 
@@ -476,6 +886,13 @@ if __name__ == "__main__":
     print(f"  {primer_reel.caption}")
     print(f"\n  Hashtags: {primer_reel.hashtags}")
     print(f"  CTA: {primer_reel.cta}")
+
+    # Plan semanal (captions + imágenes + hashtags)
+    print("\n📅 Plan semanal de posts (planificar_semana):")
+    plan = planificar_semana(guardar_airtable=False)
+    print(f"  Modo: {plan['modo']} · Generado con: {plan['generado_con']}")
+    for p in plan["posts"]:
+        print(f"  • {p['fecha']} {p['dia']}: {p['tema']}")
 
     print()
     print("=" * 70)

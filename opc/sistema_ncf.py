@@ -22,6 +22,7 @@ Para producción:
 from __future__ import annotations
 import logging
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -114,6 +115,79 @@ class NCFAsignado:
     factura_id: str = ""
 
 
+# Formato DGII: serie B + tipo (2 dígitos) + 8 dígitos secuenciales
+NCF_REGEX = re.compile(r"^B(01|02|04|14|15)(\d{8})$")
+
+# Vigencia de las secuencias autorizadas por DGII (configurable por .env).
+# DGII normalmente autoriza secuencias con vencimiento al 31 de diciembre.
+NCF_FECHA_VENCIMIENTO_DEFAULT = os.getenv("NCF_FECHA_VENCIMIENTO", "2026-12-31")
+
+# Contador local para modo MOCK (sin Airtable). Por proceso, no persistente.
+_SECUENCIA_LOCAL: dict[str, int] = {}
+
+
+def _rango_autorizado(tipo: str) -> int:
+    """Cantidad de NCF autorizados por DGII para el tipo (override por .env)."""
+    env_var = f"NCF_RANGO_{tipo}"
+    try:
+        return int(os.getenv(env_var, str(TIPOS_NCF[tipo]["rango_default"])))
+    except (ValueError, KeyError):
+        return TIPOS_NCF.get(tipo, {}).get("rango_default", 100)
+
+
+def validar_ncf(ncf: str, fecha_emision: str | None = None) -> dict:
+    """
+    Valida un NCF dominicano:
+      1. Formato B01/B02/B04/B14/B15 + 8 dígitos
+      2. Secuencia dentro del rango autorizado por DGII
+      3. Vigencia de la secuencia (fecha de emisión <= vencimiento DGII)
+
+    Devuelve dict explícito:
+      {"valido": bool, "tipo": str, "secuencia": int, "errores": [str, ...]}
+    """
+    errores: list[str] = []
+    tipo = ""
+    secuencia = 0
+
+    match = NCF_REGEX.match((ncf or "").strip().upper())
+    if not match:
+        errores.append(
+            f"Formato inválido: '{ncf}'. Esperado B01/B02/B04/B14/B15 + 8 dígitos "
+            f"(ej: B0100000001)"
+        )
+    else:
+        tipo = f"B{match.group(1)}"
+        secuencia = int(match.group(2))
+        if secuencia < 1:
+            errores.append("La secuencia debe iniciar en 00000001")
+        rango = _rango_autorizado(tipo)
+        if secuencia > rango:
+            errores.append(
+                f"Secuencia {secuencia} excede el rango autorizado DGII para "
+                f"{tipo} ({rango}). Solicitar nueva secuencia."
+            )
+
+        # Vencimiento de la secuencia
+        fecha = fecha_emision or date.today().isoformat()
+        try:
+            if date.fromisoformat(fecha) > date.fromisoformat(NCF_FECHA_VENCIMIENTO_DEFAULT):
+                errores.append(
+                    f"Secuencia vencida: vigencia DGII hasta "
+                    f"{NCF_FECHA_VENCIMIENTO_DEFAULT}, emisión {fecha}"
+                )
+        except ValueError:
+            errores.append(f"Fecha de emisión inválida: '{fecha}'")
+
+    return {
+        "valido": not errores,
+        "ncf": ncf,
+        "tipo": tipo,
+        "secuencia": secuencia,
+        "vencimiento_secuencia": NCF_FECHA_VENCIMIENTO_DEFAULT,
+        "errores": errores,
+    }
+
+
 def proximo_ncf(api: AirtableOPC, tipo: str) -> str:
     """
     Genera el próximo NCF del tipo solicitado.
@@ -139,7 +213,21 @@ def proximo_ncf(api: AirtableOPC, tipo: str) -> str:
     else:
         siguiente = 1
 
+    rango = _rango_autorizado(tipo)
+    if siguiente > rango:
+        raise ValueError(
+            f"Secuencia {tipo} agotada ({siguiente} > rango autorizado {rango}). "
+            f"Solicitar nueva secuencia a DGII."
+        )
     return f"{tipo}{siguiente:08d}"
+
+
+def proximo_ncf_local(tipo: str) -> str:
+    """Secuencia local (modo MOCK, sin Airtable). No persistente entre procesos."""
+    if tipo not in TIPOS_NCF:
+        raise ValueError(f"Tipo NCF inválido: {tipo}")
+    _SECUENCIA_LOCAL[tipo] = _SECUENCIA_LOCAL.get(tipo, 0) + 1
+    return f"{tipo}{_SECUENCIA_LOCAL[tipo]:08d}"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -341,6 +429,168 @@ def guardar_factura_en_airtable(api: AirtableOPC, factura: Factura) -> dict:
         "Estado": factura.estado,
         "Fecha_vencimiento": factura.fecha_vencimiento,
     })
+
+
+# ─────────────────────────────────────────────────────────────
+# EMISIÓN DIRECTA: generar_factura(servicio, cliente, rnc)
+# ─────────────────────────────────────────────────────────────
+
+def _validar_rnc(rnc: str) -> dict:
+    """
+    Valida formato de RNC dominicano: 9 dígitos (empresa) o 11 (cédula).
+    Acepta guiones/espacios y los normaliza.
+    """
+    digitos = re.sub(r"\D", "", rnc or "")
+    if len(digitos) in (9, 11):
+        return {"valido": True, "rnc_normalizado": digitos}
+    return {
+        "valido": False,
+        "rnc_normalizado": digitos,
+        "error": f"RNC inválido: '{rnc}'. Debe tener 9 dígitos (RNC) u 11 (cédula).",
+    }
+
+
+def generar_factura(servicio: dict, cliente: dict, rnc: str = "") -> dict:
+    """
+    Emite una factura NCF para un servicio puntual y la registra en Airtable
+    (tabla Facturas_NCF) cuando hay credenciales; sin Airtable usa secuencia
+    local (modo mock) — nunca crashea.
+
+    servicio: {"descripcion": str, "monto_rd": float, "cantidad": int opc,
+               "fecha": "YYYY-MM-DD" opc, "periodo": str opc}
+    cliente:  {"nombre": str, "direccion": str opc, "email": str opc}
+    rnc:      RNC del cliente → B01 (Crédito Fiscal). Vacío → B02 (Consumo).
+
+    Devuelve dict explícito:
+      éxito → {"ok": True, "modo": "real"|"mock", "factura": {...}}
+      error → {"ok": False, "error": str, "detalle": ...}
+    """
+    # ── Validación de entrada ──
+    if not isinstance(servicio, dict) or not isinstance(cliente, dict):
+        return {"ok": False, "error": "servicio y cliente deben ser dicts"}
+
+    descripcion = (servicio.get("descripcion") or "").strip()
+    if not descripcion:
+        return {"ok": False, "error": "Falta servicio['descripcion']"}
+
+    try:
+        monto = Decimal(str(servicio.get("monto_rd", servicio.get("tarifa_rd", 0))))
+    except Exception:
+        return {"ok": False, "error": f"Monto inválido: {servicio.get('monto_rd')}"}
+    if monto <= 0:
+        return {"ok": False, "error": "El monto del servicio debe ser mayor a 0"}
+
+    nombre_cliente = (cliente.get("nombre") or "").strip()
+    if not nombre_cliente:
+        return {"ok": False, "error": "Falta cliente['nombre']"}
+
+    rnc_normalizado = ""
+    if rnc:
+        val_rnc = _validar_rnc(rnc)
+        if not val_rnc["valido"]:
+            return {"ok": False, "error": val_rnc["error"]}
+        rnc_normalizado = val_rnc["rnc_normalizado"]
+
+    # B01 con RNC (crédito fiscal) · B02 consumidor final
+    tipo_ncf = servicio.get("tipo_ncf") or ("B01" if rnc_normalizado else "B02")
+    if tipo_ncf not in TIPOS_NCF:
+        return {
+            "ok": False,
+            "error": f"Tipo NCF no soportado: {tipo_ncf}",
+            "tipos_validos": list(TIPOS_NCF.keys()),
+        }
+
+    # ── Asignación de NCF (Airtable real o secuencia local mock) ──
+    modo = "real"
+    try:
+        api = AirtableOPC()
+        ncf = proximo_ncf(api, tipo_ncf)
+    except ValueError as exc:
+        # Secuencia agotada u otro error de negocio explícito
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        logger.warning("Sin Airtable, NCF con secuencia local (mock): %s", exc)
+        api = None
+        modo = "mock"
+        ncf = proximo_ncf_local(tipo_ncf)
+
+    fecha_emision = servicio.get("fecha") or date.today().isoformat()
+
+    # ── Validación del NCF emitido ──
+    validacion = validar_ncf(ncf, fecha_emision)
+    if not validacion["valido"]:
+        return {
+            "ok": False,
+            "error": "NCF generado no pasó validación DGII",
+            "detalle": validacion["errores"],
+        }
+
+    # ── Construcción de la factura ──
+    cantidad = int(servicio.get("cantidad", 1) or 1)
+    factura = Factura(
+        ncf=ncf,
+        tipo_ncf=tipo_ncf,
+        fecha_emision=fecha_emision,
+        cliente_nombre=nombre_cliente,
+        cliente_rnc=rnc_normalizado,
+        cliente_direccion=cliente.get("direccion", ""),
+        cliente_email=cliente.get("email", ""),
+        periodo=servicio.get("periodo", fecha_emision),
+        lineas=[LineaFactura(
+            descripcion=descripcion,
+            cantidad=cantidad,
+            precio_unitario_rd=monto,
+        )],
+        fecha_vencimiento=(
+            date.fromisoformat(fecha_emision) + timedelta(days=30)
+        ).isoformat(),
+    )
+    factura.calcular_totales()
+
+    # ── Registro de la emisión en Airtable ──
+    airtable_id = ""
+    if api is not None:
+        try:
+            registro = guardar_factura_en_airtable(api, factura)
+            airtable_id = registro.get("id", "")
+        except Exception as exc:
+            logger.error("Factura emitida pero NO registrada en Airtable: %s", exc)
+            modo = "mock"
+
+    return {
+        "ok": True,
+        "modo": modo,
+        "factura": {
+            "ncf": factura.ncf,
+            "tipo_ncf": factura.tipo_ncf,
+            "tipo_nombre": TIPOS_NCF[tipo_ncf]["nombre"],
+            "fecha_emision": factura.fecha_emision,
+            "fecha_vencimiento": factura.fecha_vencimiento,
+            "vencimiento_secuencia": validacion["vencimiento_secuencia"],
+            "emisor": EMISOR_EMOVILS["razon_social"],
+            "cliente": {
+                "nombre": factura.cliente_nombre,
+                "rnc": factura.cliente_rnc,
+                "direccion": factura.cliente_direccion,
+                "email": factura.cliente_email,
+            },
+            "lineas": [
+                {
+                    "descripcion": l.descripcion,
+                    "cantidad": l.cantidad,
+                    "precio_unitario_rd": float(l.precio_unitario_rd),
+                    "subtotal_rd": float(l.subtotal_rd),
+                }
+                for l in factura.lineas
+            ],
+            "subtotal_rd": float(factura.subtotal_rd),
+            "itbis_rd": float(factura.itbis_rd),
+            "total_rd": float(factura.total_rd),
+            "moneda": factura.moneda,
+            "estado": factura.estado,
+            "airtable_id": airtable_id,
+        },
+    }
 
 
 # ─────────────────────────────────────────────────────────────
