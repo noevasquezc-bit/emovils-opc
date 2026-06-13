@@ -29,6 +29,9 @@ Pillow>=10.0.0
 python-dateutil>=2.8.2
 pytz>=2024.1
 
+# Automatización temporal (opc/scheduler.py — reportes, follow-ups, quincena)
+apscheduler>=3.10
+
 # Testing
 pytest>=8.0.0
 pytest-mock>=3.12.0

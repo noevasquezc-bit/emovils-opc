@@ -14,6 +14,8 @@ Endpoints nuevos para el sistema OPC:
   /api/v2/social/publicar   — Publica post aprobado (Meta Graph API)
   /api/v2/prospeccion/buscar — Pipeline de prospección B2B
   /api/v2/ncf/emitir        — Emite factura NCF (DGII)
+  /api/v2/scheduler/status  — Jobs programados + próximas ejecuciones
+  /api/v2/scheduler/run/<id> — Dispara un job manualmente (pruebas)
   /health                   — Healthcheck
 """
 import logging
@@ -60,6 +62,7 @@ from opc.airtable_api_opc import AirtableOPC
 from opc.agente_social import planificar_semana, publicar_post, procesar_aprobacion
 from opc.agente_prospector import ejecutar_pipeline_prospeccion
 from opc.sistema_ncf import generar_factura
+from opc.scheduler import iniciar_scheduler, listar_jobs, ejecutar_job
 
 
 logging.basicConfig(
@@ -70,6 +73,23 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app)
+
+# ═══════════════════════════════════════════════════════════════
+# SCHEDULER (automatización temporal — opc/scheduler.py)
+#
+# IMPORTANTE: el scheduler debe correr en UN SOLO proceso. El Procfile
+# usa `--workers 1 --threads 16` justamente por esto. Si en Railway se
+# escala a más workers, poner ENABLE_SCHEDULER=0 en el servicio web y
+# correr un servicio worker aparte con ENABLE_SCHEDULER=1.
+# Default: "1" (activado). Nunca crashea sin credenciales (mock/skip+log).
+# ═══════════════════════════════════════════════════════════════
+if os.getenv("ENABLE_SCHEDULER", "1") == "1":
+    try:
+        iniciar_scheduler()
+    except Exception as _sched_exc:
+        logger.error(f"No pude iniciar el scheduler: {_sched_exc}")
+else:
+    logger.info("ENABLE_SCHEDULER=0 — scheduler desactivado en este proceso")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -740,6 +760,39 @@ def dashboard_html():
     if not html_path.exists():
         return "Dashboard no encontrado", 404
     return html_path.read_text(encoding="utf-8")
+
+
+# ═══════════════════════════════════════════════════════════════
+# SCHEDULER — STATUS + EJECUCIÓN MANUAL DE JOBS
+# ═══════════════════════════════════════════════════════════════
+
+@app.route("/api/v2/scheduler/status", methods=["GET"])
+def scheduler_status():
+    """Lista los jobs registrados y su próxima ejecución (hora RD)."""
+    try:
+        return jsonify(listar_jobs())
+    except Exception as e:
+        logger.error(f"Error /scheduler/status: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/v2/scheduler/run/<job_id>", methods=["POST"])
+def scheduler_run(job_id: str):
+    """
+    Dispara un job manualmente (útil para pruebas). Solo corre si el
+    job_id existe en el registro; devuelve el resumen de la ejecución.
+    """
+    try:
+        resultado = ejecutar_job(job_id)
+        if resultado is None:
+            return jsonify({
+                "error": f"Job '{job_id}' no existe",
+                "jobs_disponibles": [j["job_id"] for j in listar_jobs()["jobs"]],
+            }), 404
+        return jsonify(resultado)
+    except Exception as e:
+        logger.error(f"Error /scheduler/run/{job_id}: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 # ═══════════════════════════════════════════════════════════════
