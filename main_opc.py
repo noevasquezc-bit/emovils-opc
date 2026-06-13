@@ -812,16 +812,22 @@ def mvp_cotizar():
     """Body: {origen, destino, pasajeros, hora, km_estimados?}"""
     data = request.get_json(force=True, silent=True) or {}
     try:
+        # km_estimados solo como override manual; si no viene, se mide con Google
+        km_manual = data.get("km_estimados")
         c = mvp_core.cotizar(
             origen=data["origen"], destino=data["destino"],
             pasajeros=int(data.get("pasajeros", 1)),
             hora=int(data.get("hora", 12)),
-            km_estimados=float(data.get("km_estimados", 10.0)),
+            km_estimados=float(km_manual) if km_manual is not None else None,
         )
         return jsonify({
             "precio_rd": c.precio_rd, "vehiculo": c.vehiculo_recomendado,
             "es_nocturno": c.es_nocturno, "requiere_supervisor": c.requiere_supervisor,
             "razon_supervisor": c.razon_supervisor, "moneda": c.moneda,
+            "distancia_km": c.km_estimados, "distancia_texto": c.distancia_texto,
+            "duracion_texto": c.duracion_texto, "maps_url": c.maps_url,
+            "direccion_no_resuelta": c.direccion_no_resuelta,
+            "fuente_distancia": c.fuente_distancia,
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 400
@@ -989,9 +995,10 @@ def _render_driver_dashboard(driver_id: str, reservas: list) -> str:
             </div>
             <div>👤 {r['customer_name']} <a href='tel:{r['customer_phone']}'>{r['customer_phone']}</a></div>
             <div>📍 <b>{r['origen']}</b> → {r['destino']}</div>
-            <div>⏰ {r['service_time']} · 👥 {r['passengers']} pax · 🚗 {r['vehicle_type']}</div>
+            <div>⏰ {r['service_time']} · 👥 {r['passengers']} pax · 🚗 {r['vehicle_type']}{(" · 📏 " + str(r['distancia_km']) + " km") if r.get('distancia_km') else ""}</div>
             <div>💰 RD${r['final_price']:,} · {r['payment_method']} ({r['payment_status']})</div>
             <div>Verificacion vehiculo: {verde}</div>
+            {("<div>🗺️ <a href='" + r['maps_url'] + "' target='_blank'>Navegar en Google Maps</a></div>") if r.get('maps_url') else ""}
             <div class='actions'>
                 <button onclick="scanQR('{r['booking_id']}')">📷 Escanear QR cliente</button>
             </div>

@@ -67,13 +67,18 @@ class Cotizacion:
     origen: str
     destino: str
     pasajeros: int
-    km_estimados: float
-    vehiculo_recomendado: str  # "Sedan", "Van Caravan", "supervisor"
+    km_estimados: float            # km REAL medido por Google (nombre por compat)
+    vehiculo_recomendado: str      # "Sedan", "Van Caravan", "supervisor", ""
     precio_rd: int
     es_nocturno: bool
     requiere_supervisor: bool
     razon_supervisor: str = ""
     moneda: str = "RD$"
+    distancia_texto: str = ""       # ej "33,0 km"
+    duracion_texto: str = ""        # ej "37 min"
+    maps_url: str = ""              # link Google Maps para el chofer
+    direccion_no_resuelta: bool = False
+    fuente_distancia: str = "google"  # google | manual | ninguna
 
 
 def _es_hora_nocturna(hora: int) -> bool:
@@ -81,13 +86,57 @@ def _es_hora_nocturna(hora: int) -> bool:
     return hora >= HORARIO_NOCTURNO_INICIO or hora < HORARIO_NOCTURNO_FIN
 
 
-def cotizar(origen: str, destino: str, pasajeros: int, hora: int, km_estimados: float = 10.0) -> Cotizacion:
-    """Cotizacion MVP simple. Solo servicios urbanos directos."""
+def _normalizar_direccion(direccion: str) -> str:
+    """Agrega contexto de RD si la direccion no menciona el pais — mejora geocoding."""
+    d = (direccion or "").strip()
+    low = d.lower()
+    marcadores = ["republica dominicana", "república dominicana", "rep. dom",
+                  "dominican", ", do", ", rd", " do ", " rd "]
+    if any(m in low for m in marcadores):
+        return d
+    return f"{d}, República Dominicana"
+
+
+def _medir_distancia_google(origen: str, destino: str) -> Optional[dict]:
+    """Distancia y duracion REAL via Google Distance Matrix. None si no hay key o falla."""
+    if not os.getenv("GOOGLE_MAPS_API_KEY"):
+        logger.warning("GOOGLE_MAPS_API_KEY no configurada — no se puede medir distancia")
+        return None
+    try:
+        from lib.google_maps import get_distance_matrix
+        r = get_distance_matrix(_normalizar_direccion(origen), _normalizar_direccion(destino))
+        if "error" not in r and r.get("distance_km"):
+            return {
+                "km": round(float(r["distance_km"]), 1),
+                "distancia_texto": r.get("distance_text", ""),
+                "duracion_texto": r.get("duration_text", ""),
+            }
+        logger.warning("Google no resolvio la ruta: %s", r.get("error", r))
+    except Exception as e:
+        logger.warning("Google Distance Matrix fallo: %s", e)
+    return None
+
+
+def _maps_url(origen: str, destino: str) -> str:
+    """Link de Google Maps (direcciones) para que el chofer navegue."""
+    try:
+        from lib.google_maps import get_directions_url
+        return get_directions_url(_normalizar_direccion(origen), _normalizar_direccion(destino))
+    except Exception:
+        return ""
+
+
+def cotizar(origen: str, destino: str, pasajeros: int, hora: int,
+            km_estimados: Optional[float] = None, usar_google: bool = True) -> Cotizacion:
+    """Cotizacion MVP. Mide la distancia REAL con Google Maps.
+
+    REGLA: nunca se inventa la distancia. Si Google no resuelve y no se pasa
+    km_estimados manual, devuelve direccion_no_resuelta=True (sin precio)."""
     # Validar pasajeros
     if pasajeros > VAN_CAPACITY:
         return Cotizacion(
             origen=origen, destino=destino, pasajeros=pasajeros,
-            km_estimados=km_estimados, vehiculo_recomendado="supervisor",
+            km_estimados=0.0, vehiculo_recomendado="supervisor",
             precio_rd=0, es_nocturno=False, requiere_supervisor=True,
             razon_supervisor=f"Mas de {VAN_CAPACITY} pasajeros — requiere coordinacion especial",
         )
@@ -97,9 +146,34 @@ def cotizar(origen: str, destino: str, pasajeros: int, hora: int, km_estimados: 
 
     es_nocturno = _es_hora_nocturna(hora)
 
-    # Calculo base
+    # 1) Medir distancia REAL con Google
+    km = None
+    distancia_texto = duracion_texto = ""
+    fuente = "google"
+    if usar_google:
+        med = _medir_distancia_google(origen, destino)
+        if med:
+            km = med["km"]
+            distancia_texto = med["distancia_texto"]
+            duracion_texto = med["duracion_texto"]
+
+    # 2) Fallback SOLO si se paso km manual (endpoint/test). NUNCA inventar.
+    if km is None:
+        if km_estimados is not None:
+            km = float(km_estimados)
+            fuente = "manual"
+        else:
+            return Cotizacion(
+                origen=origen, destino=destino, pasajeros=pasajeros,
+                km_estimados=0.0, vehiculo_recomendado="", precio_rd=0,
+                es_nocturno=es_nocturno, requiere_supervisor=False,
+                razon_supervisor="No se pudo calcular la distancia con Google — direccion imprecisa.",
+                direccion_no_resuelta=True, fuente_distancia="ninguna",
+            )
+
+    # 3) Calculo de precio con km real
     base = MINIMUM_FARE_DOP
-    km_extra = max(0, km_estimados - KM_INCLUIDOS_BASE)
+    km_extra = max(0, km - KM_INCLUIDOS_BASE)
     precio = base + (km_extra * CIUDAD_POR_KM_ADICIONAL)
 
     # Vehiculo segun pasajeros
@@ -122,9 +196,11 @@ def cotizar(origen: str, destino: str, pasajeros: int, hora: int, km_estimados: 
 
     return Cotizacion(
         origen=origen, destino=destino, pasajeros=pasajeros,
-        km_estimados=km_estimados, vehiculo_recomendado=vehiculo,
+        km_estimados=km, vehiculo_recomendado=vehiculo,
         precio_rd=precio_redondeado, es_nocturno=es_nocturno,
-        requiere_supervisor=False,
+        requiere_supervisor=False, distancia_texto=distancia_texto,
+        duracion_texto=duracion_texto, maps_url=_maps_url(origen, destino),
+        fuente_distancia=fuente,
     )
 
 
@@ -228,9 +304,15 @@ def crear_reserva(
     service_date: Optional[str] = None,
     service_time: Optional[str] = None,
     vehicle_type: str = "Sedan",
+    distance_km: Optional[float] = None,
 ) -> dict:
     """Crea booking en Airtable. Devuelve {booking_id, record_id, qr_url, qr_token}."""
     booking_id = "EMV-" + datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(2).upper()
+
+    # Distancia real (para registro y navegacion del chofer)
+    if distance_km is None:
+        med = _medir_distancia_google(origin, destination)
+        distance_km = med["km"] if med else None
 
     pm = payment_method.lower()
     if pm == "cash":
@@ -256,6 +338,7 @@ def crear_reserva(
         "Pickup_Location": origin,
         "Dropoff_Location": destination,
         "Passengers": passengers,
+        "Distance_KM": distance_km if distance_km is not None else 0,
         "final_price": final_price,
         "currency": "RD$",
         "payment_method": pm,
@@ -507,18 +590,22 @@ def reservas_conductor(driver_id: str) -> list[dict]:
     out = []
     for b in bookings:
         bf = b["fields"]
+        origen = bf.get("Pickup_Location", "")
+        destino = bf.get("Dropoff_Location", "")
         out.append({
             "booking_id": bf.get("Booking_ID", ""),
             "customer_name": bf.get("customer_name", ""),
             "customer_phone": bf.get("customer_phone", ""),
-            "origen": bf.get("Pickup_Location", ""),
-            "destino": bf.get("Dropoff_Location", ""),
+            "origen": origen,
+            "destino": destino,
             "service_time": bf.get("service_time", ""),
             "passengers": bf.get("Passengers", 0),
             "vehicle_type": bf.get("vehicle_type_mvp", ""),
             "payment_method": bf.get("payment_method", ""),
             "payment_status": bf.get("payment_status", ""),
             "final_price": bf.get("final_price", 0),
+            "distancia_km": bf.get("Distance_KM", ""),
+            "maps_url": _maps_url(origen, destino),
             "booking_status": bf.get("booking_status", ""),
             "vehicle_verification_status": bf.get("vehicle_verification_status", "not_started"),
             "pickup_confirmed": bf.get("pickup_confirmed", False),

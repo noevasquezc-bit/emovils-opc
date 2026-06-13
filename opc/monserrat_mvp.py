@@ -67,7 +67,17 @@ NO inventes datos ni precios si falta información.
 ═══════════════════════════════════════════════════════
 COTIZACIÓN
 ═══════════════════════════════════════════════════════
+REGLA ABSOLUTA: NUNCA estimes ni inventes distancias, kilómetros ni precios. El sistema
+mide la distancia REAL con Google Maps automáticamente al invocar cotizar_mvp. Tú solo
+pasas origen y destino tal como los dio el cliente. No menciones kilómetros al cliente
+salvo que la herramienta te los devuelva.
+
 Cuando tengas los 4 datos → invoca la herramienta cotizar_mvp.
+- Si la herramienta devuelve direccion_no_resuelta=true → NO des precio. Pide al cliente
+  una dirección más específica:
+  "Para calcular la tarifa exacta, ¿podría darme una dirección más precisa? Por ejemplo,
+   el sector, un punto de referencia o el nombre exacto del lugar."
+  Si tras pedirla la herramienta sigue sin resolver, escala a supervisor.
 - Si requiere_supervisor=true (más de 7 pax, B2B, tours, fuera de RD) → invoca
   escalar_supervisor con la razón y responde al cliente:
   "Ese tipo de servicio requiere validación especial. Lo voy a pasar con un supervisor
@@ -159,17 +169,19 @@ HERRAMIENTAS_MVP = [
     {
         "name": "cotizar_mvp",
         "description": (
-            "Calcula precio MVP. Usar cuando tengas origen, destino, pasajeros y hora. "
-            "Si pasajeros>7 devuelve requiere_supervisor=true (NO sigas cotizando)."
+            "Calcula el precio MVP. El sistema mide la distancia REAL con Google Maps "
+            "automaticamente a partir de origen y destino. NO le pases distancia ni km: "
+            "tu NO debes estimar ni inventar distancias. Usar cuando tengas origen, destino, "
+            "pasajeros y hora. Si pasajeros>7 devuelve requiere_supervisor=true. Si devuelve "
+            "direccion_no_resuelta=true, NO des precio: pide una direccion mas especifica."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "origen": {"type": "string"},
-                "destino": {"type": "string"},
+                "origen": {"type": "string", "description": "Direccion/lugar de recogida tal como lo dio el cliente"},
+                "destino": {"type": "string", "description": "Direccion/lugar de destino tal como lo dio el cliente"},
                 "pasajeros": {"type": "integer"},
                 "hora": {"type": "integer", "description": "Hora 0-23 (24h)"},
-                "km_estimados": {"type": "number", "default": 10.0},
             },
             "required": ["origen", "destino", "pasajeros", "hora"],
         },
@@ -223,11 +235,21 @@ def _ejecutar_tool(nombre: str, args: dict, whatsapp_cliente: str) -> dict:
             destino=args["destino"],
             pasajeros=int(args["pasajeros"]),
             hora=int(args["hora"]),
-            km_estimados=float(args.get("km_estimados", 10.0)),
+            # SIN km: el sistema mide la distancia real con Google. Monserrat no inventa.
         )
+        if c.direccion_no_resuelta:
+            return {
+                "direccion_no_resuelta": True,
+                "mensaje": ("No se pudo calcular la distancia con Google Maps. "
+                            "Pide al cliente una direccion mas especifica (sector, "
+                            "punto de referencia o nombre exacto del lugar). NO des precio."),
+            }
         return {
             "precio_rd": c.precio_rd,
             "vehiculo_recomendado": c.vehiculo_recomendado,
+            "distancia_km": c.km_estimados,
+            "distancia_texto": c.distancia_texto,
+            "duracion_texto": c.duracion_texto,
             "es_nocturno": c.es_nocturno,
             "requiere_supervisor": c.requiere_supervisor,
             "razon_supervisor": c.razon_supervisor,
