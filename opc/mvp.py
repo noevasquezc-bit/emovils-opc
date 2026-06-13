@@ -98,13 +98,37 @@ def _normalizar_direccion(direccion: str) -> str:
 
 
 def _medir_distancia_google(origen: str, destino: str) -> Optional[dict]:
-    """Distancia y duracion REAL via Google Distance Matrix. None si no hay key o falla."""
+    """Distancia y duracion REAL via Google Distance Matrix.
+
+    Devuelve None si:
+      - no hay API key,
+      - Google NO encuentra con precision el origen o el destino (direccion vaga
+        o con errores: Google 'adivina' un punto generico y daria un precio falso),
+      - la API falla.
+    Cuando devuelve None, cotizar() responde direccion_no_resuelta=True y Monserrat
+    pide una direccion mas especifica en vez de inventar un precio.
+    """
     if not os.getenv("GOOGLE_MAPS_API_KEY"):
         logger.warning("GOOGLE_MAPS_API_KEY no configurada — no se puede medir distancia")
         return None
     try:
-        from lib.google_maps import get_distance_matrix
-        r = get_distance_matrix(_normalizar_direccion(origen), _normalizar_direccion(destino))
+        from lib.google_maps import get_distance_matrix, geocode_detallado
+        o_norm = _normalizar_direccion(origen)
+        d_norm = _normalizar_direccion(destino)
+
+        # 1) Verificar que Google encuentra AMBOS lugares con precision (no adivina)
+        go = geocode_detallado(o_norm)
+        gd = geocode_detallado(d_norm)
+        if not go.get("preciso") or not gd.get("preciso"):
+            logger.info(
+                "Geocode impreciso — origen '%s' (%s) destino '%s' (%s)",
+                origen, {k: go.get(k) for k in ("preciso", "partial_match", "types", "formatted")},
+                destino, {k: gd.get(k) for k in ("preciso", "partial_match", "types", "formatted")},
+            )
+            return None
+
+        # 2) Medir distancia real
+        r = get_distance_matrix(o_norm, d_norm)
         if "error" not in r and r.get("distance_km"):
             return {
                 "km": round(float(r["distance_km"]), 1),

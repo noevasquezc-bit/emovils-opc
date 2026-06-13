@@ -123,6 +123,59 @@ def geocode(address: str) -> dict:
     return {}
 
 
+# Tipos de geocodificacion demasiado amplios (pais/provincia/municipio) — NO sirven
+# para una recogida ni para medir una tarifa real. Si Google solo resuelve a este
+# nivel, significa que no encontro el lugar exacto.
+_TIPOS_VAGOS = {
+    "country", "administrative_area_level_1", "administrative_area_level_2",
+    "administrative_area_level_3", "political", "colloquial_area",
+}
+
+
+def geocode_detallado(address: str) -> dict:
+    """Geocodifica una direccion devolviendo informacion de PRECISION.
+
+    preciso=True solo si Google encontro el lugar exacto (no 'partial_match')
+    y no es una zona amplia (pais/provincia). Si preciso=False, la direccion es
+    demasiado vaga o tiene errores: NO se debe cotizar, hay que pedir mas detalle.
+    """
+    if not GOOGLE_MAPS_API_KEY:
+        return {"ok": False, "preciso": False, "motivo": "sin_api_key"}
+    url = f"{MAPS_BASE}/geocode/json"
+    params = {"address": address, "key": GOOGLE_MAPS_API_KEY,
+              "language": "es", "region": "do"}
+    try:
+        resp = requests.get(url, params=params, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        logger.warning(f"geocode_detallado error: {e}")
+        return {"ok": False, "preciso": False, "motivo": f"error:{e}"}
+
+    results = data.get("results", [])
+    if not results:
+        return {"ok": False, "preciso": False, "motivo": "sin_resultados",
+                "status": data.get("status", "")}
+
+    r = results[0]
+    partial = bool(r.get("partial_match", False))
+    types = set(r.get("types", []))
+    loc_type = r.get("geometry", {}).get("location_type", "")
+    solo_vago = types.issubset(_TIPOS_VAGOS) if types else True
+    preciso = (not partial) and (not solo_vago)
+    return {
+        "ok": True,
+        "preciso": preciso,
+        "partial_match": partial,
+        "solo_vago": solo_vago,
+        "types": sorted(types),
+        "location_type": loc_type,
+        "formatted": r.get("formatted_address", ""),
+        "lat": r["geometry"]["location"]["lat"],
+        "lng": r["geometry"]["location"]["lng"],
+    }
+
+
 def get_directions_url(origin: str, destination: str) -> str:
     """Genera un URL de Google Maps para compartir por WhatsApp."""
     o = origin.replace(" ", "+")
