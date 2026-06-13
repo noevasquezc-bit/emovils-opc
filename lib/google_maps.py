@@ -161,8 +161,13 @@ def geocode_detallado(address: str) -> dict:
     partial = bool(r.get("partial_match", False))
     types = set(r.get("types", []))
     loc_type = r.get("geometry", {}).get("location_type", "")
+    # 'solo_vago' = Google solo pudo ubicar el texto a nivel pais/provincia/municipio
+    # (p.ej. "Caribe tour" -> {country, political} = "República Dominicana"). Eso da una
+    # distancia falsa. NO usamos partial_match como criterio: Google lo activa tambien en
+    # direcciones validas que resuelven a una calle concreta (route), y rechazarlas seria
+    # un falso positivo. La senal confiable es que el resultado NO sea solo una zona amplia.
     solo_vago = types.issubset(_TIPOS_VAGOS) if types else True
-    preciso = (not partial) and (not solo_vago)
+    preciso = not solo_vago
     return {
         "ok": True,
         "preciso": preciso,
