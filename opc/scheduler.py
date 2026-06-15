@@ -488,6 +488,19 @@ JOBS: dict[str, dict] = {
 }
 
 
+def job_despacho_tick() -> dict:
+    """Reasigna ofertas de carrera vencidas (chofer no respondió en 60s)."""
+    try:
+        import opc.mvp as _mvp
+        r = _mvp.revisar_ofertas_vencidas()
+        if r.get("vencidas"):
+            logger.info("⏱️ Despacho: %s oferta(s) vencida(s) reasignada(s)", r["vencidas"])
+        return r
+    except Exception as exc:
+        logger.warning("Despacho tick falló: %s", exc)
+        return {"error": str(exc)}
+
+
 def iniciar_scheduler():
     """
     Arranca el BackgroundScheduler (singleton, thread-safe).
@@ -539,6 +552,9 @@ def iniciar_scheduler():
                           id="plan_social_semanal", name=JOBS["plan_social_semanal"]["descripcion"])
             sched.add_job(job_cpa_safeguard, IntervalTrigger(hours=6, timezone=TZ_RD),
                           id="cpa_safeguard", name=JOBS["cpa_safeguard"]["descripcion"])
+            # Despacho: revisar ofertas vencidas cada 15s y reasignar al siguiente.
+            sched.add_job(job_despacho_tick, IntervalTrigger(seconds=15, timezone=TZ_RD),
+                          id="despacho_tick", name="Reasignar ofertas de carrera vencidas")
 
             sched.start()
             _scheduler = sched
