@@ -65,6 +65,7 @@ from opc.agente_social import planificar_semana, publicar_post, procesar_aprobac
 from opc.agente_prospector import ejecutar_pipeline_prospeccion
 from opc.sistema_ncf import generar_factura
 from opc.scheduler import iniciar_scheduler, listar_jobs, ejecutar_job
+from opc import auth
 
 
 logging.basicConfig(
@@ -1203,6 +1204,93 @@ def seguir_pasajero(booking_id):
     return _render_tracking_page(booking_id)
 
 
+@app.route("/api/v2/flota", methods=["GET"])
+def api_flota():
+    """Estado de toda la flota (para el mapa en vivo de la institución)."""
+    return jsonify(mvp_core.estado_flota()), 200
+
+
+@app.route("/flota", methods=["GET"])
+def flota_mapa():
+    """Mapa en vivo de la institución: todos los choferes y su estado."""
+    return _render_flota_page()
+
+
+def _render_flota_page() -> str:
+    # Página estática; los datos se cargan en vivo desde /api/v2/flota (mismo origen).
+    return """<!doctype html><html lang='es'><head><meta charset='utf-8'>
+<meta name='viewport' content='width=device-width, initial-scale=1'>
+<title>Emovils — Flota en vivo</title>
+<link rel='stylesheet' href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css'/>
+<style>
+body{margin:0;background:#0f172a;color:#e2e8f0;font-family:-apple-system,Segoe UI,Roboto,sans-serif}
+.top{padding:12px 16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;border-bottom:1px solid #1e293b}
+.brand{font-weight:800;letter-spacing:1px;color:#fff;font-size:18px;margin-right:auto}
+.chip{background:#1e293b;border-radius:999px;padding:6px 12px;font-size:14px;font-weight:700}
+.g{color:#4ade80}.o{color:#fbbf24}.w{color:#94a3b8}
+#map{height:60vh;width:100%}
+.upd{font-size:12px;color:#64748b;padding:8px 16px}
+.list{padding:4px 16px 28px}
+.row{background:#1e293b;border-radius:12px;padding:10px 12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;gap:10px}
+.nm{font-weight:700;color:#fff}
+.meta{font-size:13px;color:#94a3b8}
+.dot{width:10px;height:10px;border-radius:50%;display:inline-block;margin-right:6px;vertical-align:middle}
+</style></head><body>
+<div class='top'>
+  <div class='brand'>EMOVILS · Flota en vivo</div>
+  <div class='chip g'>📡 En vivo: <span id='cLive'>0</span></div>
+  <div class='chip o'>💤 Sin señal: <span id='cStale'>0</span></div>
+  <div class='chip w'>⚪ Sin GPS: <span id='cNo'>0</span></div>
+</div>
+<div id='map'></div>
+<div class='upd' id='upd'>Cargando flota…</div>
+<div class='list' id='list'></div>
+<script src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'></script>
+<script>
+var map=L.map('map').setView([18.4861,-69.9312],9);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(map);
+var COL={available:'#16a34a',busy:'#f59e0b',offline:'#94a3b8'};
+var ET={available:'Disponible',busy:'En viaje',offline:'Desconectado'};
+var capa=L.layerGroup().addTo(map); var primero=true;
+function haceSec(s){
+  if(s==null) return 'sin señal';
+  if(s<60) return 'hace '+s+' s';
+  if(s<3600) return 'hace '+Math.floor(s/60)+' min';
+  if(s<86400) return 'hace '+Math.floor(s/3600)+' h';
+  return 'hace '+Math.floor(s/86400)+' d';
+}
+function esc(s){return (s==null?'':String(s)).replace(/[&<>]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});}
+async function cargar(){
+  try{
+    var r=await fetch('/api/v2/flota'); var j=await r.json();
+    if(!j.ok) return;
+    document.getElementById('cLive').textContent=j.resumen.en_vivo;
+    document.getElementById('cStale').textContent=j.resumen.sin_senal;
+    document.getElementById('cNo').textContent=j.resumen.sin_gps;
+    capa.clearLayers(); var pts=[]; var html='';
+    j.choferes.forEach(function(c){
+      var et=ET[c.status]||c.status;
+      var col=c.live?(COL[c.status]||COL.offline):'#94a3b8';
+      var nombre=esc(c.driver_name||c.driver_id);
+      var fresco=c.live?'📡 en vivo':(c.lat!=null?('💤 última '+haceSec(c.secs_ago)):'⚪ sin GPS');
+      if(c.lat!=null && c.lng!=null){
+        var pop='<b>'+nombre+'</b><br>'+et+' · '+fresco+'<br>'+esc(c.vehiculo||'');
+        if(c.viaje){ pop+='<br>🧑 '+esc(c.viaje.cliente||'')+'<br>→ '+esc(c.viaje.destino||''); }
+        L.circleMarker([c.lat,c.lng],{radius:c.live?10:8,color:'#0f172a',weight:2,fillColor:col,fillOpacity:c.live?0.95:0.5}).bindPopup(pop).addTo(capa);
+        pts.push([c.lat,c.lng]);
+      }
+      html+='<div class="row"><div><div class="nm"><span class="dot" style="background:'+col+'"></span>'+nombre+'</div><div class="meta">'+et+(c.viaje?(' · → '+esc(c.viaje.destino||'')):'')+'</div></div><div class="meta">'+fresco+'</div></div>';
+    });
+    document.getElementById('list').innerHTML=html||'<div class="meta">No hay choferes registrados todavía.</div>';
+    document.getElementById('upd').textContent='Actualizado '+new Date().toLocaleTimeString()+' · 📡 en vivo = enviando GPS ahora · 💤 = última posición conocida';
+    if(primero && pts.length){ map.fitBounds(pts,{padding:[40,40],maxZoom:14}); primero=false; }
+  }catch(e){ document.getElementById('upd').textContent='Sin conexión, reintentando…'; }
+}
+cargar(); setInterval(cargar,15000);
+</script>
+</body></html>"""
+
+
 def _render_tracking_page(booking_id: str) -> str:
     from html import escape as _esc
     bid = _esc(booking_id)
@@ -1295,6 +1383,8 @@ html,body{margin:0;min-height:100%;font-family:-apple-system,Segoe UI,Roboto,san
 .card{background:#1e293b;border-radius:16px;padding:18px;margin-top:16px}
 #dot{display:inline-block;width:12px;height:12px;border-radius:50%;background:#64748b;margin-right:8px;vertical-align:middle}
 #dot.on{background:#22c55e;animation:p 1.4s infinite}
+#dot.warn{background:#f59e0b}
+#dot.err{background:#ef4444}
 @keyframes p{0%{box-shadow:0 0 0 0 rgba(34,197,94,.6)}70%{box-shadow:0 0 0 12px rgba(34,197,94,0)}100%{box-shadow:0 0 0 0 rgba(34,197,94,0)}}
 #estado{font-size:20px;font-weight:800;vertical-align:middle}
 .rows{margin-top:14px}
@@ -1325,7 +1415,7 @@ html,body{margin:0;min-height:100%;font-family:-apple-system,Segoe UI,Roboto,san
 </div>
 <script>
 const DID='__DID__';
-let watchId=null,wake=null,enviadas=0,lastSent=0,activo=false;
+let watchId=null,wake=null,enviadas=0,lastSent=0,activo=false,lastPos=null,lastPosTime=0,hb=null;
 
 fetch('/api/v2/drivers/'+encodeURIComponent(DID)).then(r=>r.json()).then(j=>{
   if(j&&j.ok){
@@ -1336,9 +1426,11 @@ fetch('/api/v2/drivers/'+encodeURIComponent(DID)).then(r=>r.json()).then(j=>{
 }).catch(()=>{});
 
 function msg(t){document.getElementById('msg').textContent=t||'';}
+function setEstado(txt,cls){document.getElementById('estado').textContent=txt;var d=document.getElementById('dot');d.className='';if(cls)d.classList.add(cls);}
 function fmtHora(d){return d.toLocaleTimeString('es-DO',{hour:'2-digit',minute:'2-digit',second:'2-digit'});}
 
 async function send(lat,lng){
+  lastSent=Date.now();
   try{
     const r=await fetch('/api/v2/driver/gps',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({driver_id:DID,lat:lat,lng:lng})});
@@ -1346,42 +1438,46 @@ async function send(lat,lng){
     if(!j.ok){msg('No se pudo registrar: '+(j.razon||'error'));return;}
     enviadas++;document.getElementById('cont').textContent=enviadas;
     document.getElementById('ultima').textContent=fmtHora(new Date());
-    msg('');
-  }catch(e){msg('Sin conexión. Reintentando…');}
+    setEstado('EN LÍNEA','on');msg('');
+  }catch(e){setEstado('Sin conexión…','warn');msg('Reintentando…');}
 }
 
 function onPos(p){
   document.getElementById('prec').textContent=Math.round(p.coords.accuracy)+' m';
-  const now=Date.now();
-  if(now-lastSent<3500)return;   // throttle ~4 s
-  lastSent=now;
-  send(p.coords.latitude,p.coords.longitude);
+  lastPos={lat:p.coords.latitude,lng:p.coords.longitude};lastPosTime=Date.now();
+  if(Date.now()-lastSent<3500)return;   // al moverse: ~4 s
+  send(lastPos.lat,lastPos.lng);
 }
 function onErr(e){
-  if(e.code===1)msg('Permiso de ubicación denegado. Actívelo en los ajustes del navegador.');
-  else if(e.code===2)msg('No se pudo obtener la ubicación (señal GPS débil).');
-  else if(e.code===3)msg('La ubicación tardó demasiado. Reintentando…');
-  else msg('Error de ubicación.');
+  if(e.code===1){setEstado('GPS BLOQUEADO','err');msg('Permiso de ubicación DENEGADO. Toca el candado o la ⓘ en la barra de direcciones → Ubicación → Permitir, y recarga la página.');}
+  else if(e.code===2){setEstado('Buscando señal…','warn');msg('No se pudo obtener la ubicación (señal GPS débil).');}
+  else if(e.code===3){setEstado('Buscando señal…','warn');msg('La ubicación tardó demasiado. Reintentando…');}
+  else{setEstado('Buscando señal…','warn');msg('Error de ubicación.');}
 }
 
 async function pedirWake(){try{if('wakeLock' in navigator){wake=await navigator.wakeLock.request('screen');}}catch(e){}}
 
 async function start(){
-  if(!('geolocation' in navigator)){msg('Este dispositivo no soporta GPS.');return;}
+  if(!('geolocation' in navigator)){setEstado('Sin GPS','err');msg('Este dispositivo no soporta GPS.');return;}
   watchId=navigator.geolocation.watchPosition(onPos,onErr,{enableHighAccuracy:true,maximumAge:2000,timeout:15000});
   await pedirWake();
   activo=true;
-  document.getElementById('dot').classList.add('on');
-  document.getElementById('estado').textContent='EN LÍNEA';
+  setEstado('Buscando señal…','warn');
   const b=document.getElementById('btn');b.textContent='■ DETENER';b.classList.add('stop');
-  msg('Buscando señal GPS…');
+  msg('Activando tu ubicación…');
+  if(hb)clearInterval(hb);
+  hb=setInterval(()=>{
+    if(!activo)return;
+    if(lastPos && (Date.now()-lastPosTime<90000)){send(lastPos.lat,lastPos.lng);}   // latido solo si la posición es reciente
+    else if(lastPosTime && (Date.now()-lastPosTime>=90000)){setEstado('Buscando señal…','warn');msg('Sin lecturas recientes del GPS. Mantén esta pantalla abierta y el GPS encendido.');}
+  },15000); // evita reenviar posiciones falsas/congeladas
 }
 function stop(){
   if(watchId!=null){navigator.geolocation.clearWatch(watchId);watchId=null;}
+  if(hb){clearInterval(hb);hb=null;}
   if(wake){try{wake.release();}catch(e){}wake=null;}
-  activo=false;
-  document.getElementById('dot').classList.remove('on');
-  document.getElementById('estado').textContent='Desconectado';
+  activo=false;lastPos=null;lastPosTime=0;
+  setEstado('Desconectado','');
   const b=document.getElementById('btn');b.textContent='▶ INICIAR GPS';b.classList.remove('stop');
   msg('');
 }
@@ -1492,6 +1588,67 @@ def api_drivers_actualizar(driver_id):
         max_pax=d.get("max_pax"),
     )
     return jsonify(res), (200 if res.get("ok") else 400)
+
+
+# ═══════════════════════════════════════════════════════════════
+# CUENTAS DE USUARIO (auth) — empresa / chofer / cliente
+# Registro, inicio de sesión y recuperación de contraseña por WhatsApp.
+# ═══════════════════════════════════════════════════════════════
+@app.route("/api/v2/auth/register", methods=["POST"])
+def api_auth_register():
+    d = request.get_json(silent=True) or {}
+    res = auth.registrar(
+        role=d.get("role", ""),
+        nombre=d.get("nombre", "") or d.get("name", ""),
+        telefono=d.get("telefono", "") or d.get("phone", ""),
+        password=d.get("password", ""),
+        email=d.get("email", ""),
+    )
+    return jsonify(res), (200 if res.get("ok") else 400)
+
+
+@app.route("/api/v2/auth/login", methods=["POST"])
+def api_auth_login():
+    d = request.get_json(silent=True) or {}
+    res = auth.login(
+        role=d.get("role", ""),
+        telefono=d.get("telefono", "") or d.get("phone", ""),
+        password=d.get("password", ""),
+    )
+    return jsonify(res), (200 if res.get("ok") else 401)
+
+
+@app.route("/api/v2/auth/forgot", methods=["POST"])
+def api_auth_forgot():
+    d = request.get_json(silent=True) or {}
+    res = auth.solicitar_codigo(
+        role=d.get("role", ""),
+        telefono=d.get("telefono", "") or d.get("phone", ""),
+    )
+    return jsonify(res), (200 if res.get("ok") else 400)
+
+
+@app.route("/api/v2/auth/reset", methods=["POST"])
+def api_auth_reset():
+    d = request.get_json(silent=True) or {}
+    res = auth.restablecer(
+        role=d.get("role", ""),
+        telefono=d.get("telefono", "") or d.get("phone", ""),
+        codigo=d.get("codigo", "") or d.get("code", ""),
+        nueva_password=d.get("password", "") or d.get("nueva_password", ""),
+    )
+    return jsonify(res), (200 if res.get("ok") else 400)
+
+
+@app.route("/api/v2/auth/me", methods=["GET"])
+def api_auth_me():
+    authz = request.headers.get("Authorization", "")
+    if authz.lower().startswith("bearer "):
+        token = authz[7:].strip()
+    else:
+        token = request.args.get("token", "") or ""
+    res = auth.cuenta_desde_token(token)
+    return jsonify(res), (200 if res.get("ok") else 401)
 
 
 def _render_drivers_admin(choferes: list) -> str:

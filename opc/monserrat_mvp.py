@@ -153,6 +153,12 @@ FLUJO DE RESERVA (sigue el orden, no te saltes pasos)
    a cotizar con cotizar_mvp) y muestra el resumen otra vez. NO reserves hasta que el cliente
    diga que sí al resumen.
 6) Cuando el cliente confirme el resumen → invoca la herramienta crear_reserva_mvp.
+   IMPORTANTE — hora de recogida (service_time): pasa SIEMPRE la fecha/hora que pidió el cliente.
+     • Si es para AHORA / lo antes posible / sin hora específica → service_time="ahora".
+     • Si pidió una hora o día específico → pásalo tal cual: "hoy 6pm", "mañana 8:30am",
+       "pasado mañana 14:00" o "2026-06-20 09:00".
+   El sistema decide solo: si la recogida es dentro de 2 horas envía el taxi más cercano ya;
+   si es para más tarde, la AGENDA con un chofer y le recuerda 2 horas antes.
    Devuelve: booking_id y qr_url. (El chofer NO se asigna en este paso; el sistema lo asigna
    y se lo notifica al cliente por separado cuando un conductor acepta.)
 
@@ -270,7 +276,7 @@ HERRAMIENTAS_MVP = [
                 "final_price": {"type": "integer"},
                 "payment_method": {"type": "string", "enum": ["cash", "card", "online"]},
                 "vehicle_type": {"type": "string", "enum": ["Van Ejecutiva", "Van Grande"]},
-                "service_time": {"type": "string", "description": "ej: 'hoy 6pm' o '2026-06-13 14:00'"},
+                "service_time": {"type": "string", "description": "Hora de recogida que pidió el cliente. 'ahora' si es inmediato/sin hora; o 'hoy 6pm', 'mañana 8:30am', 'pasado mañana 14:00', '2026-06-20 09:00' si es para más tarde. El sistema decide si despacha ya o lo agenda."},
             },
             "required": ["customer_name", "customer_phone", "origin", "destination",
                           "passengers", "final_price", "payment_method", "vehicle_type"],

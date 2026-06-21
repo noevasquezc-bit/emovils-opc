@@ -616,6 +616,24 @@ def crear_reserva(
     qr_token, qr_url = generar_qr_cliente(booking_id)
     now = datetime.now().isoformat()
 
+    # --- INMEDIATO vs PROGRAMADO ------------------------------------------
+    # Interpretamos la hora de recogida que pidio el cliente.
+    #   pickup_dt = None  -> es para AHORA (taxi mas cercano ya)
+    #   pickup_dt > 2h     -> es PROGRAMADO (se agenda y se recuerda 2h antes)
+    texto_hora = (service_time or "").strip()
+    # Si llega la fecha por separado y la hora no trae fecha propia, las unimos.
+    if service_date and not re.search(r"\d{4}-\d{2}-\d{2}", texto_hora):
+        _hm = _parse_hora_texto(texto_hora)
+        if _hm:
+            texto_hora = f"{service_date} {_hm[0]:02d}:{_hm[1]:02d}"
+    pickup_dt = _parse_pickup_dt(texto_hora)
+    es_prog = _es_programado(pickup_dt)
+    # service_time: guardamos el texto humano (lindo en los mensajes).
+    service_time_txt = (service_time or "").strip() or "ahora"
+    # Travel_Date (dateTime): hora exacta de recogida si es programado; si es
+    # inmediato, el instante de creacion (marca temporal, queda en el pasado).
+    travel_date_val = pickup_dt.isoformat() if pickup_dt is not None else _now_utc().isoformat()
+
     fields = {
         "Booking_ID": booking_id,
         "customer_name": customer_name,
@@ -635,19 +653,22 @@ def crear_reserva(
         "customer_qr_status": "active",
         "vehicle_verification_status": "not_started",
         "pickup_confirmed": False,
-        "service_time": service_time or now,
-        "Travel_Date": service_date or datetime.now().date().isoformat(),
+        "service_time": service_time_txt,
+        "Travel_Date": travel_date_val,
         "Created_At": now,
     }
     rec = _at_create("Bookings", fields)
     logger.info("✓ Booking creado: %s (record %s)", booking_id, rec["id"])
 
-    # Despacho automatico: ofrecer al chofer mas cercano. Nunca rompe la reserva.
+    # Despacho automatico. INMEDIATO = taxi mas cercano YA; PROGRAMADO = se le
+    # ofrece a un chofer para que lo agende (mismo flujo, con TTL/mensaje propios
+    # que decide _despachar_siguiente segun la hora de recogida). Nunca rompe la reserva.
     despacho = None
     if booking_status == "confirmed":
         try:
             despacho = iniciar_despacho(booking_id)
-            logger.info("Despacho %s: %s", booking_id,
+            logger.info("Despacho %s [%s]: %s", booking_id,
+                        "PROGRAMADO " + _fmt_dt_rd(pickup_dt) if es_prog else "INMEDIATO",
                         despacho.get("offer_status") or despacho.get("razon"))
         except Exception as e:
             logger.warning("Despacho fallo para %s: %s", booking_id, e)
@@ -658,6 +679,8 @@ def crear_reserva(
         "qr_url": qr_url,
         "qr_token": qr_token,
         "booking_status": booking_status,
+        "programado": es_prog,
+        "pickup_dt": pickup_dt.isoformat() if pickup_dt else None,
         "despacho": despacho,
     }
 
@@ -749,11 +772,24 @@ def asignar_conductor_y_vehiculo(booking_id: str, vehicle_type: str) -> dict:
 # Estado persistido en Bookings: offer_status, offered_driver_id,
 # offer_expires_at, offer_attempts, offer_log.
 
-OFERTA_TTL_SEG = 60          # segundos que tiene el chofer para responder
+OFERTA_TTL_SEG = 60          # segundos que tiene el chofer para responder (viaje YA)
 # Por decision del negocio el chofer queda EN LINEA hasta desconectarse (panel
 # web) o entrar en carrera (busy); su ubicacion NO caduca por defecto. Este
 # valor solo aplica si se pasa max_edad_horas explicitamente a choferes_cercanos.
 UBICACION_MAX_HORAS = 12
+
+# --- Viajes PROGRAMADOS (reserva para mas tarde) -------------------------
+# Zona horaria de Republica Dominicana (AST = UTC-4, sin horario de verano).
+TZ_RD = timezone(timedelta(hours=-4))
+# Si la recogida es a mas de este margen en el futuro => es PROGRAMADO.
+# Si es para "ahora" o dentro de las proximas 2h => es INMEDIATO (taxi mas cercano ya).
+UMBRAL_PROGRAMADA_MIN = 120
+# Un viaje programado se le ofrece al chofer con mas tiempo para aceptar (30 min).
+OFERTA_TTL_PROGRAMADA_SEG = 1800
+# Cuanto antes de la recogida se le recuerda al chofer (con todos los detalles).
+RECORDATORIO_ANTES_MIN = 120
+# Marca que se escribe en offer_log cuando ya se envio el recordatorio (no repetir).
+TAG_RECORDATORIO = "RECORDATORIO_2H_ENVIADO"
 
 
 def _now_utc() -> datetime:
@@ -776,6 +812,124 @@ def _log_append(bf: dict, msg: str) -> str:
     prev = (bf.get("offer_log") or "").strip()
     line = f"{_now_utc().isoformat()} {msg}"
     return (prev + "\n" + line).strip() if prev else line
+
+
+def _strip_acentos(s) -> str:
+    """quita acentos y pasa a minuscula (para comparar palabras sin tildes)."""
+    t = unicodedata.normalize("NFKD", str(s or "")).encode("ascii", "ignore").decode()
+    return t.strip().lower()
+
+
+def _parse_hora_texto(txt: str):
+    """De un texto tipo '6pm', '6:30 pm', '23:34', '8am' saca (hora, minuto) 24h.
+    Devuelve None si no encuentra una hora valida."""
+    t = _strip_acentos(txt).replace(".", "")
+    # busca patron hora[:min] opcional am/pm
+    m = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m|p\.m)?", t)
+    if not m:
+        return None
+    h = int(m.group(1))
+    mnt = int(m.group(2) or 0)
+    ampm = (m.group(3) or "").replace(".", "")
+    if ampm == "pm" and h < 12:
+        h += 12
+    elif ampm == "am" and h == 12:
+        h = 0
+    if not (0 <= h <= 23 and 0 <= mnt <= 59):
+        return None
+    return h, mnt
+
+
+def _parse_pickup_dt(service_time, ahora=None) -> Optional[datetime]:
+    """Interpreta el texto de hora de recogida y devuelve un datetime AWARE (UTC),
+    o None si es para AHORA MISMO (inmediato) o no se entiende.
+
+    Acepta:
+      - "" / None / "ahora" / "ya" / "lo antes posible"  -> None (inmediato)
+      - ISO "2026-06-15 14:00" o "2026-06-15T14:00"        -> esa fecha/hora (RD)
+      - "hoy 6pm", "manana 8:30am", "pasado manana 14:00"  -> dia relativo + hora
+      - "6pm", "23:34", "8am"                              -> hoy a esa hora
+                                                              (manana si ya paso)
+    """
+    if ahora is None:
+        ahora = _now_utc()
+    ahora_rd = ahora.astimezone(TZ_RD)
+    t = _strip_acentos(service_time)
+    if not t or t in ("ahora", "ya", "ahora mismo", "lo antes posible", "cuanto antes", "now"):
+        return None
+
+    # 1) ISO explicito (con fecha) ej "2026-06-15 14:00" o "2026-06-15T14:00:00"
+    m_iso = re.search(r"(\d{4})-(\d{2})-(\d{2})[ t]+(\d{1,2}):(\d{2})", t)
+    if m_iso:
+        y, mo, d, h, mi = (int(g) for g in m_iso.groups())
+        try:
+            dt = datetime(y, mo, d, h, mi, tzinfo=TZ_RD)
+            return dt.astimezone(timezone.utc)
+        except ValueError:
+            return None
+
+    # 2) dia relativo
+    base = ahora_rd
+    dia_offset = None
+    if re.search(r"\bpasado\s+manana\b", t):
+        dia_offset = 2
+    elif re.search(r"\bmanana\b", t):
+        dia_offset = 1
+    elif re.search(r"\bhoy\b", t):
+        dia_offset = 0
+
+    hm = _parse_hora_texto(t)
+    if hm is None:
+        # sin hora reconocible -> no podemos programar, tratar como inmediato
+        return None
+    h, mi = hm
+
+    if dia_offset is None:
+        # solo hora (ej "6pm"): hoy; si ya paso, manana
+        cand = base.replace(hour=h, minute=mi, second=0, microsecond=0)
+        if cand <= ahora_rd:
+            cand = cand + timedelta(days=1)
+    else:
+        dia = base + timedelta(days=dia_offset)
+        cand = dia.replace(hour=h, minute=mi, second=0, microsecond=0)
+    return cand.astimezone(timezone.utc)
+
+
+_DIAS_RD = ["lun", "mar", "mie", "jue", "vie", "sab", "dom"]
+_MESES_RD = ["ene", "feb", "mar", "abr", "may", "jun",
+             "jul", "ago", "sep", "oct", "nov", "dic"]
+
+
+def _fmt_dt_rd(dt: Optional[datetime], ahora=None) -> str:
+    """datetime UTC -> texto humano en hora RD: 'hoy 11:34 PM', 'manana 6:00 AM',
+    'lun 16 jun 6:00 PM'. Sirve para mensajes al chofer/cliente."""
+    if dt is None:
+        return "ahora"
+    if ahora is None:
+        ahora = _now_utc()
+    loc = dt.astimezone(TZ_RD)
+    hoy = ahora.astimezone(TZ_RD).date()
+    delta_dias = (loc.date() - hoy).days
+    h = loc.hour
+    ampm = "AM" if h < 12 else "PM"
+    h12 = h % 12 or 12
+    hora_txt = f"{h12}:{loc.minute:02d} {ampm}"
+    if delta_dias == 0:
+        return f"hoy {hora_txt}"
+    if delta_dias == 1:
+        return f"manana {hora_txt}"
+    dia = _DIAS_RD[loc.weekday()]
+    mes = _MESES_RD[loc.month - 1]
+    return f"{dia} {loc.day} {mes} {hora_txt}"
+
+
+def _es_programado(pickup_dt: Optional[datetime], ahora=None) -> bool:
+    """True si la recogida cae a mas de UMBRAL_PROGRAMADA_MIN en el futuro."""
+    if pickup_dt is None:
+        return False
+    if ahora is None:
+        ahora = _now_utc()
+    return pickup_dt - ahora > timedelta(minutes=UMBRAL_PROGRAMADA_MIN)
 
 
 def _norm_tel(tel) -> str:
@@ -1120,7 +1274,42 @@ def _drivers_ya_ofertados(bf: dict) -> list[str]:
     return list(ids)
 
 
-def _msg_oferta(elegido: dict, bf: dict) -> str:
+def _booking_pickup_dt(bf: dict) -> Optional[datetime]:
+    """Hora de recogida programada de la reserva (Travel_Date como datetime UTC)."""
+    return _parse_dt(bf.get("Travel_Date"))
+
+
+def _booking_es_programado(bf: dict, ahora=None) -> bool:
+    """True si la reserva es para mas de 2h en el futuro (viaje PROGRAMADO)."""
+    return _es_programado(_booking_pickup_dt(bf), ahora)
+
+
+def _booking_es_futuro(bf: dict, ahora=None) -> bool:
+    """True si la recogida aun no ha llegado (sirve para permitir declinar/reasignar
+    un servicio agendado, incluso cuando ya falta <2h y dejo de ser 'programado')."""
+    dt = _booking_pickup_dt(bf)
+    if dt is None:
+        return False
+    if ahora is None:
+        ahora = _now_utc()
+    return dt > ahora
+
+
+def _msg_oferta(elegido: dict, bf: dict, pickup_dt: Optional[datetime] = None) -> str:
+    if _es_programado(pickup_dt):
+        mins = OFERTA_TTL_PROGRAMADA_SEG // 60
+        return (
+            "🗓️ *Servicio PROGRAMADO Emovils*\n\n"
+            f"📅 Para: *{_fmt_dt_rd(pickup_dt)}*\n"
+            f"📍 Recogida: {bf.get('Pickup_Location','')}\n"
+            f"🎯 Destino: {bf.get('Dropoff_Location','')}\n"
+            f"👥 Pasajeros: {bf.get('Passengers','')}\n"
+            f"📏 A ~{elegido['dist_km']} km de tu ubicacion\n"
+            f"💵 RD${bf.get('final_price',0)} ({bf.get('payment_method','')})\n\n"
+            "Si lo aceptas, *queda agendado para ti* y te lo recordamos 2 horas antes.\n"
+            "Responde *ACEPTO* para agendarlo o *RECHAZO* para pasarlo.\n"
+            f"Tienes {mins} minutos para responder."
+        )
     return (
         "🚖 *Nueva carrera Emovils*\n\n"
         f"📍 Recogida: {bf.get('Pickup_Location','')}\n"
@@ -1133,10 +1322,10 @@ def _msg_oferta(elegido: dict, bf: dict) -> str:
     )
 
 
-def _enviar_oferta_whatsapp(elegido: dict, bf: dict) -> None:
+def _enviar_oferta_whatsapp(elegido: dict, bf: dict, pickup_dt: Optional[datetime] = None) -> None:
     try:
         from opc.whatsapp_green_api import notificar_chofer
-        notificar_chofer(elegido["driver_phone"], _msg_oferta(elegido, bf))
+        notificar_chofer(elegido["driver_phone"], _msg_oferta(elegido, bf, pickup_dt))
     except Exception as e:
         logger.warning("No se pudo enviar oferta al chofer %s: %s",
                        elegido.get("driver_id"), e)
@@ -1208,19 +1397,25 @@ def _despachar_siguiente(booking_rec: dict) -> dict:
         return {"ok": False, "razon": "sin choferes disponibles cerca", "offer_status": "no_drivers"}
     elegido = candidatos[0]
     intentos = int(bf.get("offer_attempts", 0) or 0) + 1
-    expira = _now_utc() + timedelta(seconds=OFERTA_TTL_SEG)
+    # PROGRAMADO: el chofer tiene mas tiempo para aceptar (lo agenda con calma).
+    pickup_dt = _booking_pickup_dt(bf)
+    es_prog = _es_programado(pickup_dt)
+    ttl = OFERTA_TTL_PROGRAMADA_SEG if es_prog else OFERTA_TTL_SEG
+    expira = _now_utc() + timedelta(seconds=ttl)
+    etiqueta = f"PROGRAMADA {_fmt_dt_rd(pickup_dt)}" if es_prog else "inmediata"
     _at_update("Bookings", booking_rec["id"], {
         "offer_status": "offered",
         "offered_driver_id": elegido["driver_id"],
         "offer_expires_at": expira.isoformat(),
         "offer_attempts": intentos,
-        "offer_log": _log_append(bf, f"oferta #{intentos} -> {elegido['driver_id']} ({elegido['dist_km']} km)"),
+        "offer_log": _log_append(bf, f"oferta #{intentos} ({etiqueta}) -> {elegido['driver_id']} ({elegido['dist_km']} km)"),
     })
-    _enviar_oferta_whatsapp(elegido, bf)
+    _enviar_oferta_whatsapp(elegido, bf, pickup_dt)
     return {
         "ok": True, "offer_status": "offered", "intento": intentos,
+        "programado": es_prog,
         "driver_id": elegido["driver_id"], "driver_name": elegido["driver_name"],
-        "dist_km": elegido["dist_km"], "expira_en_seg": OFERTA_TTL_SEG,
+        "dist_km": elegido["dist_km"], "expira_en_seg": ttl,
         "candidatos": [{"driver_id": c["driver_id"], "dist_km": c["dist_km"]} for c in candidatos],
     }
 
@@ -1249,6 +1444,15 @@ def _aceptar_oferta(booking: dict, driver: dict) -> dict:
     if veh_id:
         veh = _at_get("Vehicles", formula=f"{{vehicle_id}}='{veh_id}'", max_records=1)
         vf = veh[0]["fields"] if veh else {}
+
+    pickup_dt = _booking_pickup_dt(bf)
+    es_prog = _es_programado(pickup_dt)
+    veh_txt = " ".join(x for x in [vf.get("vehicle_brand", ""),
+                                   vf.get("vehicle_model", ""),
+                                   vf.get("vehicle_color", "")] if x).strip()
+    placa = vf.get("vehicle_plate", "")
+
+    nota = "AGENDADA (programada) por" if es_prog else "ACEPTADA por"
     _at_update("Bookings", booking["id"], {
         "driver_id": did,
         "vehicle_id": veh_id,
@@ -1256,33 +1460,100 @@ def _aceptar_oferta(booking: dict, driver: dict) -> dict:
         "Driver_Phone": df.get("driver_phone", ""),
         "Driver_Vehicle": f"{vf.get('vehicle_brand','')} {vf.get('vehicle_model','')} {vf.get('vehicle_plate','')}".strip(),
         "offer_status": "accepted",
-        "offer_log": _log_append(bf, f"ACEPTADA por {did}"),
+        "offer_log": _log_append(bf, f"{nota} {did}"),
     })
-    _at_update("Drivers", driver["id"], {"driver_status": "busy"})
+    # PROGRAMADO: el chofer NO queda 'busy' (sigue EN LINEA y puede tomar otras
+    # carreras hasta que llegue la hora); el dia del servicio se le recuerda 2h antes.
+    # INMEDIATO: queda 'busy' (va en camino ya).
+    if not es_prog:
+        _at_update("Drivers", driver["id"], {"driver_status": "busy"})
 
-    # Avisar al pasajero que su chofer va en camino + link de seguimiento en vivo
     try:
-        from opc.whatsapp_green_api import enviar_a_cliente as _wa_cli
+        from opc.whatsapp_green_api import enviar_a_cliente as _wa_cli, notificar_chofer as _wa_drv
         cust = bf.get("customer_phone", "")
-        if cust:
-            link = f"{PUBLIC_BASE_URL}/seguir/{bf.get('Booking_ID','')}"
-            veh = " ".join(x for x in [vf.get("vehicle_brand", ""),
-                                       vf.get("vehicle_model", ""),
-                                       vf.get("vehicle_color", "")] if x).strip()
-            placa = vf.get("vehicle_plate", "")
-            _wa_cli(
-                cust,
-                "✅ ¡Tu Emovils va en camino! 🚖\n\n"
-                f"Chofer: {df.get('driver_name','')}\n"
-                + (f"Vehículo: {veh}\n" if veh else "")
-                + (f"Placa: {placa}\n" if placa else "")
-                + f"\n📍 Síguelo en vivo aquí:\n{link}\n\n"
-                "Te avisaremos con un sonido cuando esté a 100 metros.")
+        if es_prog:
+            # Pasajero: reserva CONFIRMADA para tal hora (sin link en vivo todavia).
+            if cust:
+                _wa_cli(
+                    cust,
+                    "✅ *¡Tu reserva quedó confirmada!* 🗓️\n\n"
+                    f"📅 {_fmt_dt_rd(pickup_dt)}\n"
+                    f"📍 {bf.get('Pickup_Location','')} → {bf.get('Dropoff_Location','')}\n"
+                    f"Chofer: {df.get('driver_name','')}\n"
+                    + (f"Vehículo: {veh_txt}\n" if veh_txt else "")
+                    + (f"Placa: {placa}\n" if placa else "")
+                    + "\nTe enviaremos el enlace de seguimiento en vivo cuando se "
+                    "acerque la hora. ¡Gracias por reservar con Emovils! 💙")
+            # Chofer: confirmacion de que quedó agendado.
+            _wa_drv(
+                df.get("driver_phone", ""),
+                "🗓️ *Servicio agendado.* Quedó guardado en tu agenda.\n\n"
+                f"📅 {_fmt_dt_rd(pickup_dt)}\n"
+                f"📍 {bf.get('Pickup_Location','')} → {bf.get('Dropoff_Location','')}\n"
+                f"👥 {bf.get('Passengers','')}  ·  💵 RD${bf.get('final_price',0)} "
+                f"({bf.get('payment_method','')})\n\n"
+                "Te lo recordaremos *2 horas antes* con todos los detalles. "
+                "Si llegado el momento no puedes, podrás responder *RECHAZO* y se "
+                "lo asignamos a otro chofer.")
+        else:
+            # Inmediato: el chofer va en camino. Avisamos a AMBOS con el tiempo
+            # estimado de llegada (ETA) y los codigos QR del viaje.
+            bid = bf.get("Booking_ID", "")
+            eta_min, _dist_m = _eta_chofer_a_pickup(bf, df)
+            eta_cli = f"⏱️ Llega en ~{eta_min} min\n" if eta_min else ""
+            qr_tok = bf.get("customer_qr_token", "")
+            # Link al QR del pasajero (lo muestra para que el chofer lo escanee).
+            qr_cli = (f"{PUBLIC_BASE_URL}/qr/cliente/{bid}/ver?t={qr_tok}"
+                      if qr_tok else "")
+            # ── CLIENTE: chofer en camino + ETA + seguimiento en vivo + su QR ──
+            if cust:
+                link = f"{PUBLIC_BASE_URL}/seguir/{bid}"
+                _wa_cli(
+                    cust,
+                    "✅ *¡Tu Emovils va en camino!* 🚖\n\n"
+                    f"👤 {df.get('driver_name','')}\n"
+                    + (f"🚐 {veh_txt}\n" if veh_txt else "")
+                    + (f"🔖 Placa {placa}\n" if placa else "")
+                    + (f"📱 {df.get('driver_phone','')}\n" if df.get("driver_phone") else "")
+                    + eta_cli
+                    + f"\n📍 Síguelo en vivo aquí:\n{link}\n"
+                    + (f"\n🔗 Tu código del viaje (muéstralo al chofer):\n{qr_cli}\n"
+                       if qr_cli else "")
+                    + "\n🛡️ Cuando llegue el auto, escanea el QR pegado en su "
+                      "lateral para confirmar que es tu Emovils.\n\n"
+                      "Te avisaremos con un sonido cuando esté a 100 metros.")
+            # ── CHOFER: hoja de servicio + datos del cliente + ETA + navegacion ──
+            drv_phone = df.get("driver_phone", "")
+            if drv_phone:
+                eta_drv = f"   (a ~{eta_min} min de ti)\n" if eta_min else ""
+                pu = _pickup_coords(bid, bf.get("Pickup_Location", ""))
+                maps_nav = (f"https://www.google.com/maps/dir/?api=1&"
+                            f"destination={pu[0]},{pu[1]}") if pu else ""
+                hoja = f"{PUBLIC_BASE_URL}/qr/cliente/{bid}?t={qr_tok}" if qr_tok else ""
+                qr_veh = f"{PUBLIC_BASE_URL}/vehicle/{veh_id}/qr" if veh_id else ""
+                _wa_drv(
+                    drv_phone,
+                    "🚖 *Servicio confirmado — vas en camino.*\n\n"
+                    f"👤 {bf.get('customer_name','')}   📱 {cust}\n"
+                    f"📍 Recoger en: {bf.get('Pickup_Location','')}\n"
+                    + eta_drv
+                    + f"🏁 Destino: {bf.get('Dropoff_Location','')}\n"
+                    f"👥 {bf.get('Passengers','')}  ·  💵 RD${bf.get('final_price',0)} "
+                    f"({bf.get('payment_method','')})\n"
+                    + (f"\n🧭 Navegar a la recogida:\n{maps_nav}\n" if maps_nav else "")
+                    + (f"\n📋 Hoja de servicio (ábrela y pulsa “Iniciar viaje”):\n{hoja}\n"
+                       if hoja else "")
+                    + (f"\n🔳 QR de tu vehículo (muéstralo / pégalo para el cliente):\n{qr_veh}\n"
+                       if qr_veh else "")
+                    + "\n✅ Al recoger al cliente, escanea SU código (o abre la hoja) "
+                      "y pulsa “Iniciar viaje”.")
     except Exception as _e:
-        logger.warning("Aviso al pasajero (aceptacion) fallo: %s", _e)
+        logger.warning("Aviso (aceptacion) fallo: %s", _e)
 
     return {
-        "ok": True, "es_chofer": True, "accion": "aceptada",
+        "ok": True, "es_chofer": True,
+        "accion": "agendada" if es_prog else "aceptada",
+        "programado": es_prog,
         "booking_id": bf.get("Booking_ID"), "driver_id": did,
         "driver_name": df.get("driver_name", ""),
         "pickup": bf.get("Pickup_Location", ""),
@@ -1302,31 +1573,70 @@ def _rechazar_oferta(booking: dict, did: str) -> dict:
     return {"ok": True, "es_chofer": True, "accion": "rechazada", "siguiente": siguiente}
 
 
+def _declinar_agendada(booking: dict, did: str) -> dict:
+    """El chofer que YA habia aceptado un servicio agendado lo declina (ej. al
+    recibir el recordatorio). Se libera la reserva y se reasigna al siguiente mas
+    cercano, con tiempo de sobra antes de la hora de recogida."""
+    bf = booking["fields"]
+    _at_update("Bookings", booking["id"], {
+        "offer_status": "rejected",
+        # quitar al chofer que declinó para no dejarlo "fantasma"
+        "driver_id": "", "Driver_Name": "", "Driver_Phone": "",
+        "Driver_Vehicle": "", "vehicle_id": "",
+        "offer_log": _log_append(bf, f"DECLINADA tras aceptar (agendada) por {did} — reasignando"),
+    })
+    # El chofer de un agendado no quedaba 'busy', asi que no hay que liberarlo.
+    # Avisar al cliente que seguimos buscando (sin alarmar).
+    try:
+        from opc.whatsapp_green_api import enviar_a_cliente as _wa_cli
+        cust = bf.get("customer_phone", "")
+        if cust:
+            _wa_cli(cust, "🔄 Estamos reconfirmando tu chofer para tu reserva. "
+                          "Te avisamos en breve con los datos actualizados. 🙏")
+    except Exception as _e:
+        logger.warning("Aviso (declinar agendada) fallo: %s", _e)
+    siguiente = _reofrecer(bf.get("Booking_ID"))
+    return {"ok": True, "es_chofer": True, "accion": "declinada_agendada", "siguiente": siguiente}
+
+
 def responder_oferta(driver_phone: str, texto: str) -> dict:
-    """Procesa la respuesta del chofer (ACEPTO / RECHAZO) a una oferta vigente."""
+    """Procesa la respuesta del chofer (ACEPTO / RECHAZO) a una oferta vigente,
+    o un RECHAZO a un servicio AGENDADO que ya habia aceptado (para reasignarlo)."""
     drivers = _buscar_driver_por_tel(driver_phone)
     if not drivers:
         return {"ok": False, "es_chofer": False}
     d = drivers[0]
     did = d["fields"].get("driver_id")
+    t = _norm_palabra(texto)
+    acepta = t.startswith("acepto") or t in {"si", "ok", "dale", "voy", "aceptar", "claro", "listo", "la tomo"}
+    rechaza = (t.startswith("rechazo") or t.startswith("cancel") or t.startswith("declin")
+               or t in {"no", "paso", "rechazar", "no puedo", "nel"})
+
+    # 1) Oferta EN VUELO (offer_status='offered'): la via normal.
     bks = _at_get("Bookings",
                   formula=f"AND({{offered_driver_id}}='{did}', {{offer_status}}='offered')",
                   max_records=1)
-    if not bks:
-        return {"ok": False, "es_chofer": True, "razon": "no_oferta_vigente"}
-    booking = bks[0]
-    bf = booking["fields"]
-    te = _parse_dt(bf.get("offer_expires_at"))
-    if te and _now_utc() > te:
-        return {"ok": False, "es_chofer": True, "razon": "oferta_vencida"}
-    t = _norm_palabra(texto)
-    acepta = t.startswith("acepto") or t in {"si", "ok", "dale", "voy", "aceptar", "claro", "listo", "la tomo"}
-    rechaza = t.startswith("rechazo") or t in {"no", "paso", "rechazar", "no puedo", "nel"}
-    if acepta and not rechaza:
-        return _aceptar_oferta(booking, d)
+    if bks:
+        booking = bks[0]
+        bf = booking["fields"]
+        te = _parse_dt(bf.get("offer_expires_at"))
+        if te and _now_utc() > te:
+            return {"ok": False, "es_chofer": True, "razon": "oferta_vencida"}
+        if acepta and not rechaza:
+            return _aceptar_oferta(booking, d)
+        if rechaza:
+            return _rechazar_oferta(booking, did)
+        return {"ok": False, "es_chofer": True, "razon": "respuesta_no_entendida"}
+
+    # 2) Sin oferta en vuelo: ¿declina un servicio AGENDADO que ya aceptó?
     if rechaza:
-        return _rechazar_oferta(booking, did)
-    return {"ok": False, "es_chofer": True, "razon": "respuesta_no_entendida"}
+        ag = _at_get("Bookings",
+                     formula=f"AND({{driver_id}}='{did}', {{offer_status}}='accepted')",
+                     max_records=1)
+        if ag and _booking_es_futuro(ag[0]["fields"]):
+            return _declinar_agendada(ag[0], did)
+
+    return {"ok": False, "es_chofer": True, "razon": "no_oferta_vigente"}
 
 
 def completar_viaje(booking_id: str) -> dict:
@@ -1410,6 +1720,62 @@ def revisar_ofertas_vencidas() -> dict:
     return {"revisadas": len(bks), "vencidas": len(detalles), "detalles": detalles}
 
 
+def _msg_recordatorio_chofer(bf: dict, pickup_dt: Optional[datetime]) -> str:
+    return (
+        "⏰ *Recordatorio de servicio Emovils*\n\n"
+        f"Tienes un servicio *{_fmt_dt_rd(pickup_dt)}* (en ~2 horas).\n\n"
+        f"📍 Recogida: {bf.get('Pickup_Location','')}\n"
+        f"🎯 Destino: {bf.get('Dropoff_Location','')}\n"
+        f"👥 Pasajeros: {bf.get('Passengers','')}\n"
+        f"👤 Cliente: {bf.get('customer_name','')}\n"
+        f"💵 RD${bf.get('final_price',0)} ({bf.get('payment_method','')})\n\n"
+        "Por favor prepárate para llegar a tiempo. Si *no puedes*, responde "
+        "*RECHAZO* ahora para asignárselo a otro chofer a tiempo."
+    )
+
+
+def _enviar_recordatorio_chofer(booking: dict) -> bool:
+    """Envia al chofer el recordatorio (con todos los detalles) de un servicio
+    agendado. Devuelve True si se logro enviar."""
+    bf = booking["fields"]
+    phone = bf.get("Driver_Phone", "") or ""
+    if not phone:
+        did = bf.get("driver_id", "")
+        drv = _at_get("Drivers", formula=f"{{driver_id}}='{did}'", max_records=1) if did else []
+        phone = drv[0]["fields"].get("driver_phone", "") if drv else ""
+    if not phone:
+        return False
+    try:
+        from opc.whatsapp_green_api import notificar_chofer
+        notificar_chofer(phone, _msg_recordatorio_chofer(bf, _booking_pickup_dt(bf)))
+        return True
+    except Exception as e:
+        logger.warning("Recordatorio a chofer fallo (%s): %s", bf.get("Booking_ID"), e)
+        return False
+
+
+def revisar_recordatorios_agendados() -> dict:
+    """Recuerda a los choferes, ~2h antes, los servicios AGENDADOS que aceptaron.
+    Envia todos los detalles y la opcion de declinar (para reasignar a tiempo).
+
+    Pensado para llamarse periodicamente (cada pocos minutos)."""
+    ahora = _now_utc()
+    limite = ahora + timedelta(minutes=RECORDATORIO_ANTES_MIN)
+    bks = _at_get("Bookings", formula="{offer_status}='accepted'", max_records=100)
+    enviados = []
+    for b in bks:
+        bf = b["fields"]
+        dt = _booking_pickup_dt(bf)
+        if dt is None or not (ahora < dt <= limite):
+            continue  # no es agendado, o aun falta mas de 2h, o ya pasó
+        if TAG_RECORDATORIO in (bf.get("offer_log") or ""):
+            continue  # ya se le recordó
+        if _enviar_recordatorio_chofer(b):
+            _at_update("Bookings", b["id"], {"offer_log": _log_append(bf, TAG_RECORDATORIO)})
+            enviados.append(bf.get("Booking_ID"))
+    return {"revisadas": len(bks), "recordados": len(enviados), "detalles": enviados}
+
+
 # ── Seguimiento en vivo del chofer para el pasajero ──────────────
 _PICKUP_GEO_CACHE: dict = {}  # booking_id -> (lat, lng); el pickup no cambia
 
@@ -1441,6 +1807,23 @@ def _eta_minutos(distancia_m) -> int:
     km = (d / 1000.0) * _ETA_FACTOR_RUTA
     minutos = km / _ETA_VELOCIDAD_KMH * 60.0
     return max(1, int(round(minutos)))
+
+
+def _eta_chofer_a_pickup(bf: dict, df: dict):
+    """ETA (minutos) y distancia (metros) del chofer al punto de recogida en el
+    momento de aceptar. Usa el GPS actual del chofer + las coordenadas del pickup.
+    Devuelve (eta_min, dist_m) o (None, None) si falta algun dato (p.ej. sin GPS
+    o sin clave de geocodificacion)."""
+    try:
+        pu = _pickup_coords(bf.get("Booking_ID", ""), bf.get("Pickup_Location", ""))
+        dlat, dlng = df.get("current_lat"), df.get("current_lng")
+        if pu and dlat not in (None, "") and dlng not in (None, ""):
+            dist_m = int(round(
+                _haversine_km(pu[0], pu[1], float(dlat), float(dlng)) * 1000))
+            return _eta_minutos(dist_m), dist_m
+    except Exception as _e:
+        logger.warning("ETA chofer->pickup fallo: %s", _e)
+    return None, None
 
 
 def estado_seguimiento(booking_id: str) -> dict:
@@ -1485,6 +1868,71 @@ def estado_seguimiento(booking_id: str) -> dict:
                         _haversine_km(pu[0], pu[1], float(dlat), float(dlng)) * 1000))
                     out["eta_min"] = _eta_minutos(out["distancia_m"])
     return out
+
+
+_FLOTA_LIVE_MAX_SEG = 300  # GPS recibido en los ultimos 5 min = "en vivo"
+
+
+def estado_flota() -> dict:
+    """Lista de TODOS los choferes con su ultima posicion y estado, para que la
+    institucion los vea en el mapa de flota. Distingue quien esta enviando GPS
+    EN VIVO (ultimos 5 min) de quien solo tiene una ultima posicion guardada
+    (sin señal ahora). Incluye, si esta en viaje, hacia donde va."""
+    recs = _at_get("Drivers", max_records=200)
+    choferes = []
+    for r in recs:
+        f = r["fields"]
+        lat, lng = f.get("current_lat"), f.get("current_lng")
+        ts = f.get("location_updated_at", "") or ""
+        secs = None
+        try:
+            if ts:
+                secs = int((_now_utc() - _parse_dt(ts)).total_seconds())
+        except Exception:
+            secs = None
+        tiene_gps = lat not in (None, "") and lng not in (None, "")
+        live = bool(tiene_gps and secs is not None and secs <= _FLOTA_LIVE_MAX_SEG)
+        choferes.append({
+            "driver_id": f.get("driver_id", ""),
+            "driver_name": f.get("driver_name", ""),
+            "status": f.get("driver_status", "offline") or "offline",
+            "phone": f.get("driver_phone", ""),
+            "lat": float(lat) if tiene_gps else None,
+            "lng": float(lng) if tiene_gps else None,
+            "updated_at": ts,
+            "secs_ago": secs,
+            "live": live,
+            "vehiculo": f.get("assigned_vehicle_id", ""),
+        })
+    # Viajes en curso (para anotar a quien lleva cada chofer ocupado).
+    viajes = {}
+    try:
+        activos = _at_get(
+            "Bookings",
+            formula="OR({offer_status}='accepted',{booking_status}='in_progress')",
+            max_records=100)
+        for b in activos:
+            bf = b["fields"]
+            did = bf.get("driver_id", "")
+            if did:
+                viajes[did] = {
+                    "cliente": bf.get("customer_name", ""),
+                    "pickup": bf.get("Pickup_Location", ""),
+                    "destino": bf.get("Dropoff_Location", ""),
+                    "booking_id": bf.get("Booking_ID", ""),
+                }
+    except Exception as _e:
+        logger.warning("estado_flota viajes fallo: %s", _e)
+    for c in choferes:
+        c["viaje"] = viajes.get(c["driver_id"])
+    resumen = {
+        "en_vivo": sum(1 for c in choferes if c["live"]),
+        "sin_senal": sum(1 for c in choferes if c["lat"] is not None and not c["live"]),
+        "sin_gps": sum(1 for c in choferes if c["lat"] is None),
+        "available": sum(1 for c in choferes if c["status"] == "available"),
+        "busy": sum(1 for c in choferes if c["status"] == "busy"),
+    }
+    return {"ok": True, "total": len(choferes), "resumen": resumen, "choferes": choferes}
 
 
 def estado_despacho(booking_id: str) -> dict:

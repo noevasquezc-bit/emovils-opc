@@ -501,6 +501,19 @@ def job_despacho_tick() -> dict:
         return {"error": str(exc)}
 
 
+def job_recordatorios_agendados() -> dict:
+    """Recuerda a los choferes (2h antes) los servicios PROGRAMADOS que aceptaron."""
+    try:
+        import opc.mvp as _mvp
+        r = _mvp.revisar_recordatorios_agendados()
+        if r.get("recordados"):
+            logger.info("🗓️ Recordatorios: %s servicio(s) agendado(s) recordado(s)", r["recordados"])
+        return r
+    except Exception as exc:
+        logger.warning("Recordatorios agendados falló: %s", exc)
+        return {"error": str(exc)}
+
+
 def iniciar_scheduler():
     """
     Arranca el BackgroundScheduler (singleton, thread-safe).
@@ -555,6 +568,9 @@ def iniciar_scheduler():
             # Despacho: revisar ofertas vencidas cada 15s y reasignar al siguiente.
             sched.add_job(job_despacho_tick, IntervalTrigger(seconds=15, timezone=TZ_RD),
                           id="despacho_tick", name="Reasignar ofertas de carrera vencidas")
+            # Recordatorios de servicios agendados: revisar cada 2 min (envía 2h antes).
+            sched.add_job(job_recordatorios_agendados, IntervalTrigger(minutes=2, timezone=TZ_RD),
+                          id="recordatorios_agendados", name="Recordar a choferes servicios agendados (2h antes)")
 
             sched.start()
             _scheduler = sched
