@@ -123,12 +123,15 @@ def geocode(address: str) -> dict:
     return {}
 
 
-# Tipos de geocodificacion demasiado amplios (pais/provincia/municipio) — NO sirven
-# para una recogida ni para medir una tarifa real. Si Google solo resuelve a este
-# nivel, significa que no encontro el lugar exacto.
+# Tipos de geocodificacion demasiado amplios (pais/provincia) — NO sirven para una
+# recogida ni para medir una tarifa real. SI aceptamos nivel municipio/sector
+# (administrative_area_level_2 y _3, locality, sublocality): en el Gran Santo Domingo
+# la gente cotiza por sector ("Villa Mella", "Los Alcarrizos", "Santo Domingo Este") y
+# el centro del sector da una distancia razonable para una cotizacion inicial — el
+# cliente confirma origen y destino antes de reservar. Rechazar esos sectores hacia que
+# Monserrat escalara al supervisor sin necesidad.
 _TIPOS_VAGOS = {
-    "country", "administrative_area_level_1", "administrative_area_level_2",
-    "administrative_area_level_3", "political", "colloquial_area",
+    "country", "administrative_area_level_1", "political", "colloquial_area",
 }
 
 

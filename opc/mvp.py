@@ -207,6 +207,29 @@ def _es_coordenada(texto: str) -> bool:
         return False
 
 
+# Coordenadas EMBEBIDAS en texto libre. Casos reales:
+#   - El cliente escribe "estoy en 18.4861, -69.9312".
+#   - El webhook arma, al compartir ubicacion de WhatsApp:
+#     "Mi ubicacion es: <lugar> (coordenadas 18.4861, -69.9312)".
+# Antes solo se aceptaba la coordenada PURA, asi que estos textos caian a geocoding
+# (que falla) y Monserrat terminaba escalando a supervisor. Exigimos decimales en
+# AMBOS numeros para no confundir pares como "2, 14" (pasajeros, hora) con coordenadas.
+_COORD_FIND_RE = re.compile(r"(-?\d{1,2}\.\d+)\s*,\s*(-?\d{1,3}\.\d+)")
+
+
+def _extraer_coordenada(texto: str) -> Optional[str]:
+    """Devuelve 'lat,lng' si el texto CONTIENE un par de coordenadas valido
+    (aunque venga rodeado de palabras). None si no hay coordenadas."""
+    for m in _COORD_FIND_RE.finditer(texto or ""):
+        try:
+            lat, lng = float(m.group(1)), float(m.group(2))
+        except ValueError:
+            continue
+        if -90 <= lat <= 90 and -180 <= lng <= 180:
+            return f"{lat},{lng}"
+    return None
+
+
 def _sin_acentos(s: str) -> str:
     """Minusculas sin acentos, para comparar nombres de sectores."""
     return "".join(
@@ -242,6 +265,11 @@ def _normalizar_direccion(direccion: str) -> str:
     ", República Dominicana" rompe el geocoding (Google la interpretaria como el
     pais entero en vez del punto exacto)."""
     d = (direccion or "").strip()
+    # Coordenada exacta: pura ("18.48,-69.93") o embebida en texto / ubicacion
+    # compartida de WhatsApp. Si hay coordenadas, son un punto EXACTO: se usan tal cual.
+    coord = _extraer_coordenada(d)
+    if coord:
+        return coord
     if _es_coordenada(d):
         return d
 
