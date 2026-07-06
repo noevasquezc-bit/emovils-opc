@@ -25,3 +25,6 @@ logs/
 # IDE
 .vscode/
 .idea/
+
+# Brandbook local (11 MB, no se necesita en el repo ni en Railway)
+/brand/

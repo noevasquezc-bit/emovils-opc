@@ -150,6 +150,26 @@ def _token_admin_ok() -> bool:
         return False
 
 
+def _rol_sesion() -> str:
+    """Devuelve el rol ('empresa', 'chofer', 'cliente') si la petición trae una
+    sesión firmada válida (cabecera 'Authorization: Bearer ...' del login de la
+    app), o '' si no hay sesión. Verifica solo la firma HMAC y la expiración
+    (sin ir a Airtable), para poder usarse en endpoints que se consultan cada
+    pocos segundos, como el mapa de flota."""
+    authz = request.headers.get("Authorization", "")
+    token = authz[7:].strip() if authz.lower().startswith("bearer ") else ""
+    if not token:
+        token = request.args.get("session", "")
+    data = auth.read_token(token) if token else None
+    return (data or {}).get("role", "") or ""
+
+
+def _sesion_equipo_ok() -> bool:
+    """True si la petición viene de un usuario logueado del equipo
+    (chofer o empresa) — la app del chofer usa esto para el mapa y el GPS."""
+    return _rol_sesion() in ("chofer", "empresa")
+
+
 def _resp_no_autorizado(msg: str = "No autorizado"):
     """Respuesta JSON 401 para APIs protegidas."""
     return jsonify({"ok": False, "error": msg}), 401
@@ -1428,9 +1448,9 @@ def mvp_iniciar_viaje(booking_id):
 @app.route("/api/v2/driver/ubicacion", methods=["POST"])
 def api_driver_ubicacion():
     """Registra la ubicacion del chofer (lo pone disponible). {phone, lat, lng}.
-    Endpoint de pruebas/control: en producción los choferes comparten su
-    ubicación por WhatsApp (webhook). Por eso aquí exigimos llave de admin."""
-    if not _token_admin_ok():
+    Lo usa también la app del chofer (fallback por teléfono cuando aún no
+    conoce su driver_id): admin o sesión válida del equipo."""
+    if not (_token_admin_ok() or _sesion_equipo_ok()):
         return _resp_no_autorizado()
     d = request.get_json(force=True, silent=True) or {}
     phone = d.get("phone") or d.get("driver_phone") or ""
@@ -1448,9 +1468,11 @@ def api_driver_gps():
     La página /chofer/gps/<id> la envía cada 3-5 s para seguimiento ultra-fluido."""
     d = request.get_json(force=True, silent=True) or {}
     did = d.get("driver_id") or ""
-    # Solo el chofer dueño del enlace firmado (o el admin) puede reportar su GPS.
+    # Puede reportar GPS: el admin, el chofer con su enlace firmado, o un
+    # usuario del equipo logueado en la app (sesión Bearer del login).
     token = d.get("token") or request.args.get("t", "")
-    if not (_token_admin_ok() or mvp_core.validar_token_driver(did, token)):
+    if not (_token_admin_ok() or mvp_core.validar_token_driver(did, token)
+            or _sesion_equipo_ok()):
         return _resp_no_autorizado()
     try:
         lat = float(d.get("lat")); lng = float(d.get("lng"))
@@ -1478,7 +1500,8 @@ def api_driver_disponibilidad():
     d = request.get_json(force=True, silent=True) or {}
     did = d.get("driver_id", "")
     token = d.get("token") or request.args.get("t", "")
-    if not (_token_admin_ok() or mvp_core.validar_token_driver(did, token)):
+    if not (_token_admin_ok() or mvp_core.validar_token_driver(did, token)
+            or _sesion_equipo_ok()):
         return _resp_no_autorizado()
     res = mvp_core.cambiar_disponibilidad_chofer(did, bool(d.get("disponible")))
     return jsonify(res), (200 if res.get("ok") else 404)
@@ -1563,8 +1586,9 @@ def seguir_pasajero(booking_id):
 @app.route("/api/v2/flota", methods=["GET"])
 def api_flota():
     """Estado de toda la flota (para el mapa en vivo de la institución).
-    Expone la posición de todos los choferes: solo con llave admin."""
-    if not _token_admin_ok():
+    Expone la posición de todos los choferes: solo con llave admin o con
+    sesión válida del equipo (chofer/empresa logueado en la app)."""
+    if not (_token_admin_ok() or _sesion_equipo_ok()):
         return _resp_no_autorizado()
     return jsonify(mvp_core.estado_flota()), 200
 
@@ -1948,8 +1972,9 @@ def mvp_drivers_admin():
 
 @app.route("/api/v2/drivers/registrar", methods=["POST"])
 def api_drivers_registrar():
-    """Alta de un chofer + su vehiculo desde el dashboard."""
-    if not _token_admin_ok():
+    """Alta de un chofer + su vehiculo desde el dashboard o el panel de
+    empresa de la app (sesión con rol 'empresa')."""
+    if not (_token_admin_ok() or _rol_sesion() == "empresa"):
         return _resp_no_autorizado()
     d = request.get_json(silent=True) or {}
     res = mvp_core.registrar_chofer(
@@ -1970,9 +1995,11 @@ def api_drivers_registrar():
 @app.route("/api/v2/drivers/<driver_id>", methods=["GET"])
 def api_drivers_get(driver_id):
     """Datos completos de un chofer (para llenar el formulario de edición).
-    Lo usa el dashboard (admin) y la propia página GPS del chofer (su token)."""
+    Lo usa el dashboard (admin), la página GPS del chofer (su token) y la
+    app del equipo (sesión chofer/empresa)."""
     token = request.args.get("t", "")
-    if not (_token_admin_ok() or mvp_core.validar_token_driver(driver_id, token)):
+    if not (_token_admin_ok() or mvp_core.validar_token_driver(driver_id, token)
+            or _sesion_equipo_ok()):
         return _resp_no_autorizado()
     res = mvp_core.obtener_chofer(driver_id)
     return jsonify(res), (200 if res.get("ok") else 404)
@@ -1980,8 +2007,8 @@ def api_drivers_get(driver_id):
 
 @app.route("/api/v2/drivers/<driver_id>/actualizar", methods=["POST"])
 def api_drivers_actualizar(driver_id):
-    """Guarda los cambios de un chofer y/o su vehículo."""
-    if not _token_admin_ok():
+    """Guarda los cambios de un chofer y/o su vehículo (admin o rol empresa)."""
+    if not (_token_admin_ok() or _rol_sesion() == "empresa"):
         return _resp_no_autorizado()
     d = request.get_json(silent=True) or {}
     res = mvp_core.actualizar_chofer(

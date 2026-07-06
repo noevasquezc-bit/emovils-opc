@@ -1,0 +1,12 @@
+# Archivos que NO se suben al cerebro (Railway). Aligera y acelera el deploy.
+.git/
+# OJO: barra inicial = excluye SOLO el brandbook de la raíz, NO la carpeta
+# chofer_web/brand/ (logos que usa la app del chofer).
+/brand/
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.env
+*.log
+.DS_Store
