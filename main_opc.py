@@ -75,7 +75,26 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-CORS(app)
+
+# ── CORS (qué OTRAS páginas web pueden llamar a nuestra API desde el navegador) ──
+# Antes estaba abierto a cualquier sitio ("*"). Ahora solo permitimos los
+# orígenes que listemos en CORS_ORIGINS (separados por coma). Por defecto, solo
+# el propio dominio del servidor: como TODAS nuestras pantallas se sirven desde
+# aquí mismo, son del "mismo origen" y no se ven afectadas. Esto bloquea que un
+# sitio ajeno use nuestra API desde el navegador de un visitante.
+_cors_env = os.getenv("CORS_ORIGINS", "").strip()
+if _cors_env:
+    _cors_origins = [o.strip() for o in _cors_env.split(",") if o.strip()]
+else:
+    _cors_origins = [u for u in [os.getenv("PUBLIC_BASE_URL", "").strip()] if u]
+if _cors_origins:
+    CORS(app, resources={r"/api/*": {"origins": _cors_origins}},
+         allow_headers=["Content-Type", "X-Admin-Token", "Authorization"])
+    logger.info("CORS restringido a: %s", ", ".join(_cors_origins))
+else:
+    # Sin dominio configurado (p. ej. local): no añadimos cabeceras CORS. Las
+    # pantallas siguen funcionando porque son del mismo origen.
+    logger.info("CORS sin orígenes externos (solo mismo origen)")
 
 # ═══════════════════════════════════════════════════════════════
 # SCHEDULER (automatización temporal — opc/scheduler.py)
@@ -93,6 +112,79 @@ if os.getenv("ENABLE_SCHEDULER", "1") == "1":
         logger.error(f"No pude iniciar el scheduler: {_sched_exc}")
 else:
     logger.info("ENABLE_SCHEDULER=0 — scheduler desactivado en este proceso")
+
+
+# ═══════════════════════════════════════════════════════════════
+# SEGURIDAD — cerraduras de los endpoints
+#
+# Hay tres tipos de "llave", según quién deba poder usar cada cosa:
+#   • ADMIN_TOKEN     → control interno del dueño (despacho manual, alta y
+#                       edición de choferes, mapa de flota). Va en la cabecera
+#                       X-Admin-Token o en ?k= de la URL.
+#   • token de cliente → viaja dentro del QR del pasajero (firma HMAC por
+#                       reserva). Protege ver/seguir/finalizar SU viaje.
+#   • token de chofer  → enlace firmado por chofer; habilita reportar su GPS y
+#                       cambiar su disponibilidad.
+# Las llaves de firma (QR_SIGNING_KEY/AUTH_SECRET) ya son obligatorias en
+# producción; ADMIN_TOKEN sigue la misma regla (falla cerrado si falta).
+# ═══════════════════════════════════════════════════════════════
+import hmac as _hmac
+
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
+if not ADMIN_TOKEN:
+    if mvp_core._es_entorno_produccion():
+        raise RuntimeError(
+            "ADMIN_TOKEN no está configurada. Es obligatoria en producción para "
+            "proteger los endpoints de control y administración (ponla en Railway)."
+        )
+    ADMIN_TOKEN = "dev-only-admin-token-no-usar-en-produccion"
+
+
+def _token_admin_ok() -> bool:
+    """True si la petición trae la llave de administrador correcta
+    (cabecera X-Admin-Token o parámetro ?k=)."""
+    tok = request.headers.get("X-Admin-Token", "") or request.args.get("k", "")
+    try:
+        return bool(tok) and _hmac.compare_digest(str(tok), ADMIN_TOKEN)
+    except Exception:
+        return False
+
+
+def _resp_no_autorizado(msg: str = "No autorizado"):
+    """Respuesta JSON 401 para APIs protegidas."""
+    return jsonify({"ok": False, "error": msg}), 401
+
+
+def _pagina_no_autorizado():
+    """Página 401 amable para rutas HTML protegidas."""
+    return (_render_simple_page(
+        "Acceso restringido",
+        "Necesitas el enlace oficial con tu llave de acceso. "
+        "Si eres del equipo Emovils, pídele el enlace al administrador.",
+        "#dc2626"), 401)
+
+
+def _webhook_autenticado() -> bool:
+    """Verifica que el webhook venga de NUESTRA cuenta de WhatsApp (Green API) y
+    no de un impostor. Acepta el token en la cabecera 'Authorization: Bearer ...'
+    o en '?token=' de la URL del webhook.
+    Si WEBHOOK_VERIFY_TOKEN aún no está configurado, deja pasar (para no cortar
+    WhatsApp antes de activarlo en Green API) pero lo avisa en el registro."""
+    esperado = os.getenv("WEBHOOK_VERIFY_TOKEN", "").strip()
+    if not esperado:
+        logger.warning("WEBHOOK_VERIFY_TOKEN sin configurar: webhook SIN protección "
+                       "(configúralo en Green API y en Railway para activarlo).")
+        return True
+    recibido = ""
+    authz = request.headers.get("Authorization", "")
+    if authz.lower().startswith("bearer "):
+        recibido = authz[7:].strip()
+    if not recibido:
+        recibido = request.args.get("token", "") or request.headers.get("X-Webhook-Token", "")
+    try:
+        return bool(recibido) and _hmac.compare_digest(str(recibido), esperado)
+    except Exception:
+        return False
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -215,6 +307,118 @@ def health():
 
 
 # ═══════════════════════════════════════════════════════════════
+# DESCARGA DE LA APP DEL CHOFER (instalación directa, sin tienda)
+# ═══════════════════════════════════════════════════════════════
+
+_DESCARGAS_DIR = ROOT / "descargas"
+_APK_NOMBRE = "Emovils-Chofer.apk"
+
+
+@app.route("/descargar", methods=["GET"])
+def descargar_app_chofer():
+    """Página de descarga de la app del chofer (Android, instalación directa)."""
+    if not (_DESCARGAS_DIR / _APK_NOMBRE).exists():
+        return jsonify({"status": "apk_no_disponible"}), 404
+    html = """<!doctype html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Emovils Chofer — Descargar app</title>
+<style>
+ body{margin:0;background:#0b0f0c;color:#eafff0;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;}
+ .wrap{max-width:460px;margin:0 auto;padding:28px 20px 60px;}
+ h1{font-size:26px;margin:18px 0 4px;}
+ .sub{color:#8fdcab;margin:0 0 24px;font-size:15px;}
+ .btn{display:block;text-align:center;background:#19c463;color:#04210f;font-weight:800;
+   font-size:20px;text-decoration:none;padding:18px;border-radius:14px;margin:10px 0 6px;}
+ .mb{color:#7fb89a;font-size:13px;text-align:center;margin-bottom:26px;}
+ ol{line-height:1.7;font-size:15px;padding-left:22px;}
+ li b{color:#19c463;}
+ .logo{font-weight:900;font-size:22px;letter-spacing:1px;}
+</style></head><body><div class="wrap">
+ <div class="logo">&#128656; EMOVILS</div>
+ <h1>App del Chofer</h1>
+ <p class="sub">Inst&aacute;lala directo en tu tel&eacute;fono Android. No necesitas tienda de apps.</p>
+ <a class="btn" href="/descargar/apk">&#11015;&#65039; Descargar la app</a>
+ <p class="mb">Versi&oacute;n Android &middot; 4.8 MB</p>
+ <ol>
+  <li>Toca <b>Descargar la app</b> y espera que baje.</li>
+  <li>Abre el archivo. Si pide permiso para <b>instalar apps desconocidas</b>, dale <b>Permitir</b>.</li>
+  <li>Abre la app <b>Emovils Chofer</b>.</li>
+  <li>Toca <b>Registrarme</b>: tu nombre, tu n&uacute;mero de WhatsApp y una contrase&ntilde;a.</li>
+  <li>Cuando pida ubicaci&oacute;n, elige <b>Permitir todo el tiempo</b> (para el GPS con pantalla apagada).</li>
+  <li>Ponte <b>EN L&Iacute;NEA</b> y listo. &#128656;</li>
+ </ol>
+</div></body></html>"""
+    return html, 200, {"Content-Type": "text/html; charset=utf-8"}
+
+
+@app.route("/descargar/apk", methods=["GET"])
+def descargar_apk_archivo():
+    """Entrega el archivo .apk para instalación directa."""
+    if not (_DESCARGAS_DIR / _APK_NOMBRE).exists():
+        return jsonify({"status": "apk_no_disponible"}), 404
+    return send_from_directory(
+        str(_DESCARGAS_DIR),
+        _APK_NOMBRE,
+        as_attachment=True,
+        mimetype="application/vnd.android.package-archive",
+    )
+
+
+# ═══════════════════════════════════════════════════════════════
+# WEB DE LA APP DEL CHOFER (la app instalada carga esto EN VIVO)
+# La app del chofer (Capacitor) abre /chofer dentro de su ventana. Servirla
+# desde el cerebro nos da DOS cosas: (1) actualizar la pantalla SIN reinstalar
+# la app, y (2) que al leer el QR del cliente, la hoja de servicio
+# (/qr/cliente/...) sea del MISMO sitio y se abra DENTRO de la app (no en el
+# navegador). Es una app de una sola página (React); el ruteo lo maneja ella.
+# ═══════════════════════════════════════════════════════════════
+
+_CHOFER_WEB_DIR = ROOT / "chofer_web"
+
+
+def _chofer_index():
+    """Sirve la página principal de la app del chofer (no se cachea, así los
+    cambios aparecen sin reinstalar)."""
+    if not (_CHOFER_WEB_DIR / "index.html").exists():
+        return jsonify({"status": "chofer_web_no_disponible"}), 404
+    resp = send_from_directory(str(_CHOFER_WEB_DIR), "index.html")
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+# Las 3 "pantallas" de la app (chofer, pasajero, panel). Todas cargan la misma
+# app de una sola página.
+@app.route("/chofer", methods=["GET"])
+@app.route("/app", methods=["GET"])
+@app.route("/panel", methods=["GET"])
+def chofer_app_spa():
+    return _chofer_index()
+
+
+@app.route("/assets/<path:filename>", methods=["GET"])
+def chofer_app_assets(filename):
+    """Archivos de la app (JS/CSS con nombre único = se pueden cachear)."""
+    return send_from_directory(str(_CHOFER_WEB_DIR / "assets"), filename)
+
+
+@app.route("/brand/<path:filename>", methods=["GET"])
+def chofer_app_brand(filename):
+    """Logos de Emovils que usa la app."""
+    return send_from_directory(str(_CHOFER_WEB_DIR / "brand"), filename)
+
+
+@app.route("/favicon.svg", methods=["GET"])
+@app.route("/icons.svg", methods=["GET"])
+def chofer_app_root_files():
+    """Íconos sueltos en la raíz que pide la app."""
+    nombre = request.path.lstrip("/")
+    if not (_CHOFER_WEB_DIR / nombre).exists():
+        return "", 404
+    return send_from_directory(str(_CHOFER_WEB_DIR), nombre)
+
+
+# ═══════════════════════════════════════════════════════════════
 # COTIZACIÓN INSTANTÁNEA
 # ═══════════════════════════════════════════════════════════════
 
@@ -312,7 +516,20 @@ def reservar():
 def whatsapp_webhook():
     """Recibe mensajes de WhatsApp via Green API y responde via Monserrat."""
     if request.method == "GET":
+        # Handshake de verificación de Meta (hub.challenge). Si Meta manda el
+        # reto con el token correcto, se lo devolvemos tal cual para validar.
+        if request.args.get("hub.mode") == "subscribe":
+            esperado = os.getenv("WEBHOOK_VERIFY_TOKEN", "").strip()
+            recibido = request.args.get("hub.verify_token", "")
+            if esperado and _hmac.compare_digest(str(recibido), esperado):
+                return request.args.get("hub.challenge", ""), 200
+            return jsonify({"status": "forbidden"}), 403
         return jsonify({"status": "Emovils webhook OPC activo"}), 200
+
+    # Solo aceptamos mensajes que vengan de NUESTRA cuenta (token verificado).
+    if not _webhook_autenticado():
+        logger.warning("Webhook rechazado: token inválido o ausente")
+        return jsonify({"status": "unauthorized"}), 403
 
     payload = request.get_json(force=True, silent=True) or {}
     try:
@@ -454,6 +671,10 @@ def whatsapp_webhook():
                         "Comparte tu ubicación para mantenerte disponible.")
             elif r.get("razon") == "oferta_vencida":
                 rmsg = "Esa oferta ya venció y pasó a otro chofer. Gracias de todos modos."
+            elif r.get("razon") == "chofer_desconectado":
+                rmsg = ("Estás *DESCONECTADO* ahora mismo, por eso no puedo asignarte "
+                        "la carrera. Para volver a recibir viajes, *ponte EN LÍNEA* "
+                        "en tu panel o comparte tu ubicación. 🟢")
             elif r.get("razon") == "respuesta_no_entendida":
                 rmsg = "Por favor responde *ACEPTO* o *RECHAZO*."
             else:
@@ -485,6 +706,31 @@ def whatsapp_webhook():
             # Expandir enlaces de Google Maps a coordenadas o nombre de lugar
             if "http" in texto:
                 texto = _expandir_maps_links(texto)
+
+            # Si el cliente compartió su UBICACIÓN, convertir las coordenadas en
+            # una dirección legible (calle + sector) para que la recogida no
+            # quede como números largos e incómodos que Monserrat tendría que
+            # leer. Solo corre para clientes (los choferes salen antes).
+            if loc_lat is not None and loc_lng is not None:
+                # El cliente compartió su UBICACIÓN (pin exacto). SIEMPRE
+                # conservamos las coordenadas exactas (el punto real de recogida)
+                # y, si se puede, le agregamos el nombre de calle/sector como
+                # etiqueta legible. NUNCA quitar las coordenadas: son el punto
+                # preciso que usan la cotización, el despacho y la navegación del
+                # chofer. Si solo dejáramos el nombre del sector, el sistema lo
+                # re-busca como texto y cae en el CENTRO del sector (lugar
+                # equivocado) — eso fue lo que pasó con "María Josefina".
+                _coord_txt = f"{loc_lat},{loc_lng}"
+                _dir = ""
+                try:
+                    from lib.google_maps import reverse_geocode
+                    _dir = reverse_geocode(loc_lat, loc_lng) or ""
+                except Exception as _rg:
+                    logger.warning("reverse_geocode cliente fallo: %s", _rg)
+                if _dir:
+                    texto = f"Mi ubicación de recogida es: {_dir} (coordenadas {_coord_txt})"
+                else:
+                    texto = f"Mi ubicación de recogida es: (coordenadas {_coord_txt})"
 
             logger.info(f"📨 Mensaje de {nombre or 'sin nombre'} ({whatsapp}): {texto[:80]}")
 
@@ -596,6 +842,9 @@ def ingestar_intelcia():
     Body JSON: { "filepath": "/path/al/excel.xlsx" }
     o multipart con archivo.
     """
+    # Solo el dueño: ingesta datos al CRM y (vía filepath) lee archivos del servidor.
+    if not _token_admin_ok():
+        return _resp_no_autorizado()
     try:
         if request.is_json:
             data = request.get_json()
@@ -635,6 +884,9 @@ def ingestar_intelcia():
 @app.route("/api/v2/reporte/diario", methods=["GET"])
 def reporte_diario():
     """Devuelve el reporte WhatsApp para el dueño (texto listo)."""
+    # Solo el dueño: contiene facturación y datos internos del negocio.
+    if not _token_admin_ok():
+        return _resp_no_autorizado()
     try:
         hoy_str = request.args.get("hoy")
         hoy = date.fromisoformat(hoy_str) if hoy_str else date.today()
@@ -667,6 +919,9 @@ def cerrar_quincena_endpoint():
     """
     Body JSON: { "fecha_corte": "2026-06-15", "dry_run": true }
     """
+    # Solo el dueño: cierra la quincena y genera liquidaciones reales.
+    if not _token_admin_ok():
+        return _resp_no_autorizado()
     data = request.get_json(force=True) or {}
     try:
         fecha_corte = date.fromisoformat(data["fecha_corte"])
@@ -707,6 +962,9 @@ def safeguards_cpa():
     Body JSON: { "gasto_usd": 45.0, "clientes_nuevos": 10 }
     Respuesta: { "cpa": 4.5, "estado": "ok|alerta|pausar", "mensaje": "..." }
     """
+    # Solo el dueño (herramienta interna del piloto).
+    if not _token_admin_ok():
+        return _resp_no_autorizado()
     data = request.get_json(force=True) or {}
     try:
         gasto_usd = float(data.get("gasto_usd", 0))
@@ -758,6 +1016,9 @@ def social_planificar():
 
     Sin tokens (LLM/Airtable) responde igual en modo mock con plantillas.
     """
+    # Solo el dueño: consume crédito de LLM y escribe en Airtable.
+    if not _token_admin_ok():
+        return _resp_no_autorizado()
     data = request.get_json(force=True, silent=True) or {}
     try:
         resultado = planificar_semana(
@@ -782,6 +1043,9 @@ def social_publicar():
 
     Sin META_ACCESS_TOKEN responde {"modo": "mock", ...} sin llamadas reales.
     """
+    # Solo el dueño: publica en las redes sociales oficiales del negocio.
+    if not _token_admin_ok():
+        return _resp_no_autorizado()
     data = request.get_json(force=True, silent=True) or {}
     try:
         post = data.get("post") or {}
@@ -835,6 +1099,9 @@ def prospeccion_buscar():
 
     Sin APIFY/APOLLO/Airtable responde {"modo": "mock", ...} con datos semilla.
     """
+    # Solo el dueño: consume crédito de Apify/Apollo y escribe en el CRM.
+    if not _token_admin_ok():
+        return _resp_no_autorizado()
     data = request.get_json(force=True, silent=True) or {}
     try:
         resultado = ejecutar_pipeline_prospeccion(
@@ -867,6 +1134,10 @@ def ncf_emitir():
 
     Sin Airtable responde {"modo": "mock", ...} con secuencia local.
     """
+    # SOLO el dueño (con su llave admin) puede emitir facturas fiscales.
+    # Sin esto, cualquiera podría quemar secuencias NCF de la DGII.
+    if not _token_admin_ok():
+        return _resp_no_autorizado()
     data = request.get_json(force=True, silent=True) or {}
     try:
         resultado = generar_factura(
@@ -889,6 +1160,9 @@ def ncf_emitir():
 @app.route("/api/v2/conductor/crear", methods=["POST"])
 def crear_conductor():
     """Crea un nuevo conductor en Airtable."""
+    # Solo el dueño: alta de personal en el CRM.
+    if not _token_admin_ok():
+        return _resp_no_autorizado()
     data = request.get_json(force=True)
     try:
         api = AirtableOPC()
@@ -902,6 +1176,9 @@ def crear_conductor():
 @app.route("/api/v2/vehiculo/crear", methods=["POST"])
 def crear_vehiculo():
     """Crea un nuevo vehículo en Airtable."""
+    # Solo el dueño: alta de vehículos en el CRM.
+    if not _token_admin_ok():
+        return _resp_no_autorizado()
     data = request.get_json(force=True)
     try:
         api = AirtableOPC()
@@ -914,7 +1191,9 @@ def crear_vehiculo():
 
 @app.route("/onboarding", methods=["GET"])
 def onboarding_html():
-    """Sirve el formulario HTML de onboarding."""
+    """Sirve el formulario HTML de onboarding. Requiere llave admin (?k=)."""
+    if not _token_admin_ok():
+        return _pagina_no_autorizado()
     html_path = ROOT / "opc" / "web" / "onboarding.html"
     if not html_path.exists():
         return "Formulario no encontrado", 404
@@ -923,7 +1202,9 @@ def onboarding_html():
 
 @app.route("/dashboard", methods=["GET"])
 def dashboard_html():
-    """Sirve el dashboard ejecutivo del dueño."""
+    """Sirve el dashboard ejecutivo del dueño. Requiere llave admin (?k=)."""
+    if not _token_admin_ok():
+        return _pagina_no_autorizado()
     html_path = ROOT / "opc" / "web" / "dashboard.html"
     if not html_path.exists():
         return "Dashboard no encontrado", 404
@@ -937,6 +1218,9 @@ def dashboard_html():
 @app.route("/api/v2/scheduler/status", methods=["GET"])
 def scheduler_status():
     """Lista los jobs registrados y su próxima ejecución (hora RD)."""
+    # Solo el dueño: información operativa interna.
+    if not _token_admin_ok():
+        return _resp_no_autorizado()
     try:
         return jsonify(listar_jobs())
     except Exception as e:
@@ -950,6 +1234,9 @@ def scheduler_run(job_id: str):
     Dispara un job manualmente (útil para pruebas). Solo corre si el
     job_id existe en el registro; devuelve el resumen de la ejecución.
     """
+    # Solo el dueño: dispara procesos internos (reportes, follow-ups, quincena).
+    if not _token_admin_ok():
+        return _resp_no_autorizado()
     try:
         resultado = ejecutar_job(job_id)
         if resultado is None:
@@ -1019,6 +1306,8 @@ def mvp_reservar():
 @app.route("/api/v2/mvp/reserva/asignar", methods=["POST"])
 def mvp_asignar():
     """Body: {booking_id, vehicle_type}"""
+    if not _token_admin_ok():
+        return _resp_no_autorizado()
     data = request.get_json(force=True, silent=True) or {}
     res = mvp_core.asignar_conductor_y_vehiculo(
         booking_id=data["booking_id"],
@@ -1029,6 +1318,10 @@ def mvp_asignar():
 
 @app.route("/api/v2/mvp/reserva/<booking_id>", methods=["GET"])
 def mvp_get_reserva(booking_id):
+    # Datos personales del pasajero: solo con el token de SU QR o llave admin.
+    token = request.args.get("t", "")
+    if not (_token_admin_ok() or mvp_core.validar_token_cliente(booking_id, token)):
+        return _resp_no_autorizado()
     r = mvp_core.obtener_reserva(booking_id)
     if not r:
         return jsonify({"error": "Reserva no encontrada"}), 404
@@ -1066,8 +1359,11 @@ def mvp_vehicle_verify_api():
 
 @app.route("/driver/dashboard", methods=["GET"])
 def mvp_driver_dashboard():
-    """Panel del conductor — reservas asignadas."""
+    """Panel del conductor — reservas asignadas. Requiere enlace firmado (?t=)."""
     driver_id = request.args.get("driver_id", "DRV-001")
+    token = request.args.get("t", "")
+    if not (_token_admin_ok() or mvp_core.validar_token_driver(driver_id, token)):
+        return _pagina_no_autorizado()
     reservas = mvp_core.reservas_conductor(driver_id)
     return _render_driver_dashboard(driver_id, reservas)
 
@@ -1082,7 +1378,11 @@ def mvp_qr_cliente_landing(booking_id):
     reserva = mvp_core.obtener_reserva(booking_id)
     if not reserva:
         return _render_simple_page("Reserva no encontrada", booking_id, "#dc2626")
-    return _render_pasajero_qr_page(reserva, token)
+    # ?g=1 viene SOLO en el QR que el chofer ESCANEA -> leer el QR inicia el
+    # viaje automáticamente. El enlace de texto (sin g) muestra la hoja con el
+    # botón manual, para poder revisar el viaje sin arrancarlo por error.
+    auto_start = request.args.get("g") == "1"
+    return _render_pasajero_qr_page(reserva, token, auto_start)
 
 
 @app.route("/qr/cliente/<booking_id>/img.png", methods=["GET"])
@@ -1091,7 +1391,7 @@ def mvp_qr_cliente_img(booking_id):
     token = request.args.get("t", "")
     if not mvp_core.validar_token_cliente(booking_id, token):
         return "QR invalido", 403
-    url = f"{mvp_core.PUBLIC_BASE_URL}/qr/cliente/{booking_id}?t={token}"
+    url = f"{mvp_core.PUBLIC_BASE_URL}/qr/cliente/{booking_id}?t={token}&g=1"
     png = mvp_core.generar_qr_png(url)
     return png, 200, {"Content-Type": "image/png", "Cache-Control": "no-store"}
 
@@ -1127,7 +1427,11 @@ def mvp_iniciar_viaje(booking_id):
 
 @app.route("/api/v2/driver/ubicacion", methods=["POST"])
 def api_driver_ubicacion():
-    """Registra la ubicacion del chofer (lo pone disponible). {phone, lat, lng}."""
+    """Registra la ubicacion del chofer (lo pone disponible). {phone, lat, lng}.
+    Endpoint de pruebas/control: en producción los choferes comparten su
+    ubicación por WhatsApp (webhook). Por eso aquí exigimos llave de admin."""
+    if not _token_admin_ok():
+        return _resp_no_autorizado()
     d = request.get_json(force=True, silent=True) or {}
     phone = d.get("phone") or d.get("driver_phone") or ""
     try:
@@ -1144,6 +1448,10 @@ def api_driver_gps():
     La página /chofer/gps/<id> la envía cada 3-5 s para seguimiento ultra-fluido."""
     d = request.get_json(force=True, silent=True) or {}
     did = d.get("driver_id") or ""
+    # Solo el chofer dueño del enlace firmado (o el admin) puede reportar su GPS.
+    token = d.get("token") or request.args.get("t", "")
+    if not (_token_admin_ok() or mvp_core.validar_token_driver(did, token)):
+        return _resp_no_autorizado()
     try:
         lat = float(d.get("lat")); lng = float(d.get("lng"))
     except (TypeError, ValueError):
@@ -1154,7 +1462,11 @@ def api_driver_gps():
 
 @app.route("/api/v2/driver/responder", methods=["POST"])
 def api_driver_responder():
-    """Simula/recibe la respuesta del chofer a una oferta. {phone, texto}."""
+    """Simula/recibe la respuesta del chofer a una oferta. {phone, texto}.
+    Endpoint de pruebas: en producción la respuesta real llega por el webhook
+    de WhatsApp. Por eso aquí exigimos llave de admin."""
+    if not _token_admin_ok():
+        return _resp_no_autorizado()
     d = request.get_json(force=True, silent=True) or {}
     res = mvp_core.responder_oferta(d.get("phone", ""), d.get("texto", ""))
     return jsonify(res), (200 if res.get("ok") else 400)
@@ -1164,61 +1476,113 @@ def api_driver_responder():
 def api_driver_disponibilidad():
     """Panel web del chofer: {driver_id, disponible:true|false}."""
     d = request.get_json(force=True, silent=True) or {}
-    res = mvp_core.cambiar_disponibilidad_chofer(d.get("driver_id", ""), bool(d.get("disponible")))
+    did = d.get("driver_id", "")
+    token = d.get("token") or request.args.get("t", "")
+    if not (_token_admin_ok() or mvp_core.validar_token_driver(did, token)):
+        return _resp_no_autorizado()
+    res = mvp_core.cambiar_disponibilidad_chofer(did, bool(d.get("disponible")))
     return jsonify(res), (200 if res.get("ok") else 404)
 
 
 @app.route("/api/v2/dispatch/<booking_id>/iniciar", methods=["POST"])
 def api_dispatch_iniciar(booking_id):
     """Arranca manualmente el despacho de una reserva."""
+    if not _token_admin_ok():
+        return _resp_no_autorizado()
     return jsonify(mvp_core.iniciar_despacho(booking_id)), 200
 
 
 @app.route("/api/v2/dispatch/<booking_id>/estado", methods=["GET"])
 def api_dispatch_estado(booking_id):
     """Inspecciona el estado de despacho de una reserva."""
+    if not _token_admin_ok():
+        return _resp_no_autorizado()
     return jsonify(mvp_core.estado_despacho(booking_id)), 200
 
 
 @app.route("/api/v2/dispatch/<booking_id>/completar", methods=["POST"])
 def api_dispatch_completar(booking_id):
-    """Cierra la carrera: reserva -> completed y el chofer vuelve a EN LÍNEA."""
+    """Cierra la carrera: reserva -> completed y el chofer vuelve a EN LÍNEA.
+    Lo cierra el chofer desde la hoja del viaje (tiene el token del QR del
+    pasajero) o el dueño con su llave de admin."""
+    token = ((request.get_json(silent=True) or {}).get("token")
+             or request.args.get("t", ""))
+    if not (_token_admin_ok() or mvp_core.validar_token_cliente(booking_id, token)):
+        return _resp_no_autorizado()
     return jsonify(mvp_core.completar_viaje(booking_id)), 200
 
 
 @app.route("/api/v2/dispatch/tick", methods=["GET", "POST"])
 def api_dispatch_tick():
     """Revisa y reasigna ofertas vencidas (lo hace tambien el scheduler)."""
+    if not _token_admin_ok():
+        return _resp_no_autorizado()
     return jsonify(mvp_core.revisar_ofertas_vencidas()), 200
 
 
 @app.route("/api/v2/track/<booking_id>", methods=["GET"])
 def api_track(booking_id):
-    """Posición del chofer + distancia al pickup para el seguimiento en vivo."""
+    """Posición del chofer + distancia al pickup para el seguimiento en vivo.
+    Solo con el token del QR del pasajero (o llave admin): expone la posición
+    del chofer y no debe ser pública."""
+    token = request.args.get("t", "")
+    if not (_token_admin_ok() or mvp_core.validar_token_cliente(booking_id, token)):
+        return _resp_no_autorizado()
     return jsonify(mvp_core.estado_seguimiento(booking_id)), 200
+
+
+@app.route("/api/v2/ruta", methods=["GET"])
+def api_ruta():
+    """Geometría de la ruta por CALLE (Google Directions) entre recogida y destino,
+    para dibujar la línea del viaje en el mapa de la hoja. Devuelve {ok, puntos}.
+    Si no se puede (sin clave o API no habilitada), puntos=[] y el frontend usa su
+    respaldo (OSRM y, si falla, línea recta)."""
+    try:
+        olat = float(request.args.get("olat", ""))
+        olng = float(request.args.get("olng", ""))
+        dlat = float(request.args.get("dlat", ""))
+        dlng = float(request.args.get("dlng", ""))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "puntos": []}), 400
+    try:
+        from lib.google_maps import ruta_calles
+        pts = ruta_calles(olat, olng, dlat, dlng)
+        return jsonify({"ok": bool(pts), "puntos": pts}), 200
+    except Exception as e:
+        logger.warning("api_ruta error: %s", e)
+        return jsonify({"ok": False, "puntos": []}), 200
 
 
 @app.route("/seguir/<booking_id>", methods=["GET"])
 def seguir_pasajero(booking_id):
     """Página que ve el pasajero: su chofer acercándose, con alerta a 100 m."""
-    return _render_tracking_page(booking_id)
+    token = request.args.get("t", "")
+    return _render_tracking_page(booking_id, token)
 
 
 @app.route("/api/v2/flota", methods=["GET"])
 def api_flota():
-    """Estado de toda la flota (para el mapa en vivo de la institución)."""
+    """Estado de toda la flota (para el mapa en vivo de la institución).
+    Expone la posición de todos los choferes: solo con llave admin."""
+    if not _token_admin_ok():
+        return _resp_no_autorizado()
     return jsonify(mvp_core.estado_flota()), 200
 
 
 @app.route("/flota", methods=["GET"])
 def flota_mapa():
-    """Mapa en vivo de la institución: todos los choferes y su estado."""
-    return _render_flota_page()
+    """Mapa en vivo de la institución: todos los choferes y su estado.
+    Requiere llave admin (?k=)."""
+    if not _token_admin_ok():
+        return _pagina_no_autorizado()
+    k = request.args.get("k", "") or request.headers.get("X-Admin-Token", "")
+    return _render_flota_page(k)
 
 
-def _render_flota_page() -> str:
+def _render_flota_page(k: str = "") -> str:
+    from html import escape as _esc
     # Página estática; los datos se cargan en vivo desde /api/v2/flota (mismo origen).
-    return """<!doctype html><html lang='es'><head><meta charset='utf-8'>
+    return ("""<!doctype html><html lang='es'><head><meta charset='utf-8'>
 <meta name='viewport' content='width=device-width, initial-scale=1'>
 <title>Emovils — Flota en vivo</title>
 <link rel='stylesheet' href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css'/>
@@ -1247,6 +1611,7 @@ body{margin:0;background:#0f172a;color:#e2e8f0;font-family:-apple-system,Segoe U
 <div class='list' id='list'></div>
 <script src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'></script>
 <script>
+var K='__K__';
 var map=L.map('map').setView([18.4861,-69.9312],9);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(map);
 var COL={available:'#16a34a',busy:'#f59e0b',offline:'#94a3b8'};
@@ -1262,7 +1627,7 @@ function haceSec(s){
 function esc(s){return (s==null?'':String(s)).replace(/[&<>]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});}
 async function cargar(){
   try{
-    var r=await fetch('/api/v2/flota'); var j=await r.json();
+    var r=await fetch('/api/v2/flota',{headers:{'X-Admin-Token':K}}); var j=await r.json();
     if(!j.ok) return;
     document.getElementById('cLive').textContent=j.resumen.en_vivo;
     document.getElementById('cStale').textContent=j.resumen.sin_senal;
@@ -1288,12 +1653,13 @@ async function cargar(){
 }
 cargar(); setInterval(cargar,15000);
 </script>
-</body></html>"""
+</body></html>""".replace("__K__", _esc(k)))
 
 
-def _render_tracking_page(booking_id: str) -> str:
+def _render_tracking_page(booking_id: str, token: str = "") -> str:
     from html import escape as _esc
     bid = _esc(booking_id)
+    tok = _esc(token)
     html = """<!doctype html><html lang='es'><head><meta charset='utf-8'>
 <meta name='viewport' content='width=device-width, initial-scale=1, maximum-scale=1'>
 <title>Emovils — Sigue tu viaje</title>
@@ -1310,6 +1676,7 @@ html,body{margin:0;height:100%;font-family:-apple-system,Segoe UI,Roboto,sans-se
 #alert.show{display:block;animation:pulse 1s infinite}
 @keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.04)}}
 #enable{position:absolute;bottom:18px;left:10px;right:10px;z-index:1200;background:#2563eb;color:#fff;border:none;padding:14px;border-radius:12px;font-weight:800;font-size:15px;cursor:pointer}
+#confirm{display:none;position:absolute;bottom:74px;left:10px;right:10px;z-index:1200;background:#16a34a;color:#fff;border:none;padding:16px;border-radius:12px;font-weight:800;font-size:16px;cursor:pointer;box-shadow:0 8px 24px rgba(0,0,0,.5)}
 .pin{font-size:30px;line-height:30px;text-align:center;filter:drop-shadow(0 2px 3px rgba(0,0,0,.5))}
 </style></head><body>
 <div id='top'>
@@ -1319,10 +1686,22 @@ html,body{margin:0;height:100%;font-family:-apple-system,Segoe UI,Roboto,sans-se
 </div>
 <div id='map'></div>
 <div id='alert'>🚖 ¡Tu Emovils está a menos de 100 m! Prepárate para salir.</div>
+<button id='confirm' onclick='confirmarSubida()'>✅ Ya estoy en el carro — iniciar viaje</button>
 <button id='enable' onclick='enableSound()'>🔔 Toca para activar el aviso con sonido</button>
 <script src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'></script>
 <script>
 const BID='__BID__';
+const TOKEN='__TOKEN__';
+async function confirmarSubida(){
+  if(!TOKEN){return;}
+  const b=document.getElementById('confirm'); b.disabled=true; b.textContent='Iniciando…';
+  try{
+    const r=await fetch('/api/v2/mvp/reserva/'+encodeURIComponent(BID)+'/iniciar',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:TOKEN})});
+    const j=await r.json();
+    if(j.ok){ b.style.display='none'; }
+    else{ b.disabled=false; b.textContent='✅ Ya estoy en el carro — iniciar viaje'; alert(j.razon||'No se pudo iniciar. Pídele al chofer que escanee tu QR.'); }
+  }catch(e){ b.disabled=false; b.textContent='✅ Ya estoy en el carro — iniciar viaje'; }
+}
 const map=L.map('map',{zoomControl:true}).setView([18.4861,-69.9312],12);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(map);
 const carIcon=L.divIcon({className:'',html:"<div class='pin'>🚖</div>",iconSize:[34,34],iconAnchor:[17,17]});
@@ -1336,12 +1715,22 @@ function fmt(m){return m>=1000?(m/1000).toFixed(1)+' km':m+' m';}
 
 async function tick(){
   try{
-    const r=await fetch('/api/v2/track/'+encodeURIComponent(BID));
+    const r=await fetch('/api/v2/track/'+encodeURIComponent(BID)+'?t='+encodeURIComponent(TOKEN));
     const j=await r.json();
     const st=document.getElementById('status'),ds=document.getElementById('dist');
     if(!j.ok){st.textContent='No encontramos tu viaje.';return;}
+    var cb=document.getElementById('confirm');
+    if(cb){cb.style.display=(TOKEN&&j.asignado&&j.booking_status!=='in_progress'&&j.booking_status!=='completed')?'block':'none';}
     if(j.pickup_lat!=null&&!pickMarker){pickMarker=L.marker([j.pickup_lat,j.pickup_lng],{icon:pickIcon}).addTo(map).bindPopup('Tu recogida');map.setView([j.pickup_lat,j.pickup_lng],15);}
-    if(j.booking_status==='completed'){st.textContent='✅ Viaje completado. ¡Gracias por viajar con Emovils!';ds.textContent='';return;}
+    if(j.booking_status==='completed'){st.textContent='✅ Viaje completado. ¡Gracias por viajar con Emovils!';ds.textContent='';document.getElementById('alert').classList.remove('show');return;}
+    if(j.booking_status==='in_progress'){
+      st.textContent='🚖 ¡Viaje iniciado! Vas rumbo a tu destino'+(j.vehiculo?(' · '+j.vehiculo):'');
+      ds.textContent='Disfruta tu viaje con Emovils 💙';
+      document.getElementById('alert').classList.remove('show');
+      var be=document.getElementById('enable'); if(be){be.style.display='none';}
+      if(j.driver_lat!=null){if(!carMarker){carMarker=L.marker([j.driver_lat,j.driver_lng],{icon:carIcon}).addTo(map);}else{carMarker.setLatLng([j.driver_lat,j.driver_lng]);}}
+      return;
+    }
     if(!j.asignado){st.textContent='Buscando tu chofer más cercano…';ds.textContent='';return;}
     if(j.driver_lat==null){st.textContent=(j.driver_name||'Tu chofer')+' aceptó tu viaje. Esperando su ubicación…';ds.textContent='';return;}
     st.textContent='🚖 '+(j.driver_name||'Tu chofer')+' va en camino'+(j.vehiculo?(' · '+j.vehiculo):'');
@@ -1358,19 +1747,24 @@ async function tick(){
 tick();setInterval(tick,5000);
 </script>
 </body></html>"""
-    return html.replace("__BID__", bid)
+    return html.replace("__BID__", bid).replace("__TOKEN__", tok)
 
 
 @app.route("/chofer/gps/<driver_id>", methods=["GET"])
 def chofer_gps(driver_id):
     """Página GPS del chofer: el navegador envía su posición cada ~4 s para un
-    seguimiento ultra-fluido, sin depender de la ubicación en vivo de WhatsApp."""
-    return _render_driver_gps_page(driver_id)
+    seguimiento ultra-fluido, sin depender de la ubicación en vivo de WhatsApp.
+    Requiere el enlace firmado del chofer (?t=) para que nadie más reporte por él."""
+    token = request.args.get("t", "")
+    if not (_token_admin_ok() or mvp_core.validar_token_driver(driver_id, token)):
+        return _pagina_no_autorizado()
+    return _render_driver_gps_page(driver_id, token)
 
 
-def _render_driver_gps_page(driver_id: str) -> str:
+def _render_driver_gps_page(driver_id: str, token: str = "") -> str:
     from html import escape as _esc
     did = _esc(driver_id)
+    dtok = _esc(token or mvp_core.firmar_driver(driver_id))
     html = """<!doctype html><html lang='es'><head><meta charset='utf-8'>
 <meta name='viewport' content='width=device-width, initial-scale=1, maximum-scale=1'>
 <title>Emovils — GPS Chofer</title>
@@ -1415,9 +1809,10 @@ html,body{margin:0;min-height:100%;font-family:-apple-system,Segoe UI,Roboto,san
 </div>
 <script>
 const DID='__DID__';
+const TOK='__DTOK__';
 let watchId=null,wake=null,enviadas=0,lastSent=0,activo=false,lastPos=null,lastPosTime=0,hb=null;
 
-fetch('/api/v2/drivers/'+encodeURIComponent(DID)).then(r=>r.json()).then(j=>{
+fetch('/api/v2/drivers/'+encodeURIComponent(DID)+'?t='+encodeURIComponent(TOK)).then(r=>r.json()).then(j=>{
   if(j&&j.ok){
     if(j.driver_name)document.getElementById('nombre').textContent=j.driver_name;
     const v=[j.marca,j.modelo,j.color,j.placa].filter(Boolean).join(' ');
@@ -1433,7 +1828,7 @@ async function send(lat,lng){
   lastSent=Date.now();
   try{
     const r=await fetch('/api/v2/driver/gps',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({driver_id:DID,lat:lat,lng:lng})});
+      body:JSON.stringify({driver_id:DID,token:TOK,lat:lat,lng:lng})});
     const j=await r.json();
     if(!j.ok){msg('No se pudo registrar: '+(j.razon||'error'));return;}
     enviadas++;document.getElementById('cont').textContent=enviadas;
@@ -1488,18 +1883,23 @@ document.addEventListener('visibilitychange',async()=>{
 });
 </script>
 </body></html>"""
-    return html.replace("__DID__", did)
+    return html.replace("__DID__", did).replace("__DTOK__", dtok)
 
 
 @app.route("/driver/<driver_id>/panel", methods=["GET"])
 def driver_panel(driver_id):
-    """Panel simple del chofer para marcarse Disponible / No disponible."""
-    return _render_driver_panel(driver_id)
+    """Panel simple del chofer para marcarse Disponible / No disponible.
+    Requiere el enlace firmado del chofer (?t=)."""
+    token = request.args.get("t", "")
+    if not (_token_admin_ok() or mvp_core.validar_token_driver(driver_id, token)):
+        return _pagina_no_autorizado()
+    return _render_driver_panel(driver_id, token)
 
 
-def _render_driver_panel(driver_id: str) -> str:
+def _render_driver_panel(driver_id: str, token: str = "") -> str:
     from html import escape as _esc
     did = _esc(driver_id)
+    dtok = _esc(token or mvp_core.firmar_driver(driver_id))
     return f"""<!doctype html><html lang='es'><head><meta charset='utf-8'>
 <meta name='viewport' content='width=device-width, initial-scale=1'>
 <title>Emovils — Panel del chofer</title>
@@ -1522,7 +1922,7 @@ button{{display:block;width:100%;border:none;padding:18px;border-radius:14px;fon
 async function setDisp(d){{
   const e=document.getElementById('estado'); e.textContent='Guardando...';
   try{{
-    const r=await fetch('/api/v2/driver/disponibilidad',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{driver_id:'{did}',disponible:d}})}});
+    const r=await fetch('/api/v2/driver/disponibilidad',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{driver_id:'{did}',token:'{dtok}',disponible:d}})}});
     const j=await r.json();
     if(j.ok){{ e.textContent = (j.driver_status==='available'?'EN LÍNEA (disponible)':'NO disponible'); e.style.color=(j.driver_status==='available'?'#4ade80':'#f87171'); }}
     else{{ e.textContent = j.razon||'Error'; e.style.color='#f87171'; }}
@@ -1534,18 +1934,23 @@ async function setDisp(d){{
 
 @app.route("/choferes", methods=["GET"])
 def mvp_drivers_admin():
-    """Dashboard para registrar y ver los choferes."""
+    """Dashboard para registrar y ver los choferes. Requiere llave admin (?k=)."""
+    if not _token_admin_ok():
+        return _pagina_no_autorizado()
     try:
         choferes = mvp_core.listar_choferes()
     except Exception as e:
         logger.warning("listar_choferes fallo: %s", e)
         choferes = []
-    return _render_drivers_admin(choferes)
+    k = request.args.get("k", "") or request.headers.get("X-Admin-Token", "")
+    return _render_drivers_admin(choferes, k)
 
 
 @app.route("/api/v2/drivers/registrar", methods=["POST"])
 def api_drivers_registrar():
     """Alta de un chofer + su vehiculo desde el dashboard."""
+    if not _token_admin_ok():
+        return _resp_no_autorizado()
     d = request.get_json(silent=True) or {}
     res = mvp_core.registrar_chofer(
         nombre=d.get("nombre", ""),
@@ -1564,7 +1969,11 @@ def api_drivers_registrar():
 
 @app.route("/api/v2/drivers/<driver_id>", methods=["GET"])
 def api_drivers_get(driver_id):
-    """Datos completos de un chofer (para llenar el formulario de edición)."""
+    """Datos completos de un chofer (para llenar el formulario de edición).
+    Lo usa el dashboard (admin) y la propia página GPS del chofer (su token)."""
+    token = request.args.get("t", "")
+    if not (_token_admin_ok() or mvp_core.validar_token_driver(driver_id, token)):
+        return _resp_no_autorizado()
     res = mvp_core.obtener_chofer(driver_id)
     return jsonify(res), (200 if res.get("ok") else 404)
 
@@ -1572,6 +1981,8 @@ def api_drivers_get(driver_id):
 @app.route("/api/v2/drivers/<driver_id>/actualizar", methods=["POST"])
 def api_drivers_actualizar(driver_id):
     """Guarda los cambios de un chofer y/o su vehículo."""
+    if not _token_admin_ok():
+        return _resp_no_autorizado()
     d = request.get_json(silent=True) or {}
     res = mvp_core.actualizar_chofer(
         driver_id,
@@ -1651,8 +2062,9 @@ def api_auth_me():
     return jsonify(res), (200 if res.get("ok") else 401)
 
 
-def _render_drivers_admin(choferes: list) -> str:
+def _render_drivers_admin(choferes: list, k: str = "") -> str:
     from html import escape as _esc
+    _base = mvp_core.PUBLIC_BASE_URL
     _badges = {
         "available": ("EN LÍNEA", "#16a34a"),
         "busy": ("EN CARRERA", "#d97706"),
@@ -1664,7 +2076,12 @@ def _render_drivers_admin(choferes: list) -> str:
         st = (c.get("driver_status") or "offline")
         etiqueta, color = _badges.get(st, (st.upper(), "#64748b"))
         ubic = "📍" if c.get("tiene_ubicacion") else "—"
-        did = _esc(c.get("driver_id", ""))
+        did_raw = str(c.get("driver_id", ""))
+        did = _esc(did_raw)
+        # Enlaces firmados (capacidad) que el dueño copia y envía a cada chofer.
+        _dt = mvp_core.firmar_driver(did_raw)
+        gps_link = _esc(f"{_base}/chofer/gps/{did_raw}?t={_dt}")
+        panel_link = _esc(f"{_base}/driver/{did_raw}/panel?t={_dt}")
         filas.append(
             "<tr><td><b>" + did + "</b></td>"
             "<td>" + _esc(c.get("driver_name", "")) + "</td>"
@@ -1672,12 +2089,15 @@ def _render_drivers_admin(choferes: list) -> str:
             "<td>" + _esc(c.get("assigned_vehicle_id", "")) + "</td>"
             "<td style='text-align:center'>" + ubic + "</td>"
             "<td><span class='badge' style='background:" + color + "'>" + etiqueta + "</span></td>"
+            "<td><button class='btn-edit' onclick=\"copiar('" + gps_link + "')\">📍 GPS</button> "
+            "<button class='btn-edit' onclick=\"copiar('" + panel_link + "')\">🟢 Panel</button></td>"
             "<td><button class='btn-edit' onclick=\"editar('" + did + "')\">✏️ Editar</button></td></tr>"
         )
     tabla = ("".join(filas) if filas else
-             "<tr><td colspan='7' style='text-align:center;color:#94a3b8;padding:18px'>"
+             "<tr><td colspan='8' style='text-align:center;color:#94a3b8;padding:18px'>"
              "Aún no hay choferes registrados.</td></tr>")
     total = len(choferes)
+    K = _esc(k)
     return f"""<!doctype html><html lang='es'><head><meta charset='utf-8'>
 <meta name='viewport' content='width=device-width, initial-scale=1'>
 <title>Emovils — Registro de choferes</title>
@@ -1740,8 +2160,9 @@ th{{color:#94a3b8;font-weight:600}}
 
 <div class='card'>
 <h2>👥 Choferes registrados ({total})</h2>
-<table><thead><tr><th>ID</th><th>Nombre</th><th>Teléfono</th><th>Vehículo</th><th>📍</th><th>Estado</th><th></th></tr></thead>
+<table><thead><tr><th>ID</th><th>Nombre</th><th>Teléfono</th><th>Vehículo</th><th>📍</th><th>Estado</th><th>Enlaces</th><th></th></tr></thead>
 <tbody>{tabla}</tbody></table>
+<div class='hint'>📍 GPS = enlace para que el chofer comparta su ubicación · 🟢 Panel = enlace para marcarse disponible. Toca el botón para copiar y envíalo por WhatsApp a ese chofer.</div>
 </div>
 
 <div id='modal' class='overlay'>
@@ -1777,6 +2198,12 @@ th{{color:#94a3b8;font-weight:600}}
 </div>
 
 <script>
+const K='{K}';
+const AH={{'Content-Type':'application/json','X-Admin-Token':K}};
+function copiar(t){{
+  try{{ navigator.clipboard.writeText(t).then(function(){{alert('Enlace copiado. Pégalo en WhatsApp para el chofer.');}},function(){{prompt('Copia este enlace:',t);}}); }}
+  catch(e){{ prompt('Copia este enlace:',t); }}
+}}
 async function reg(ev){{
   ev.preventDefault();
   const btn=document.getElementById('btn'), msg=document.getElementById('msg');
@@ -1787,7 +2214,7 @@ async function reg(ev){{
   if(!body.nombre||!body.telefono){{msg.textContent='Nombre y teléfono son obligatorios.';msg.style.color='#f87171';return false;}}
   btn.disabled=true; btn.textContent='Registrando...';
   try{{
-    const r=await fetch('/api/v2/drivers/registrar',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(body)}});
+    const r=await fetch('/api/v2/drivers/registrar',{{method:'POST',headers:AH,body:JSON.stringify(body)}});
     const j=await r.json();
     if(j.ok){{msg.textContent='✅ '+j.driver_name+' registrado ('+j.driver_id+'). Recargando...';msg.style.color='#4ade80';setTimeout(()=>location.reload(),900);}}
     else{{msg.textContent='⚠️ '+(j.razon||'No se pudo registrar');msg.style.color='#f87171';btn.disabled=false;btn.textContent='Registrar chofer';}}
@@ -1798,7 +2225,7 @@ async function reg(ev){{
 let _curId=null;
 async function editar(id){{
   try{{
-    const r=await fetch('/api/v2/drivers/'+encodeURIComponent(id));
+    const r=await fetch('/api/v2/drivers/'+encodeURIComponent(id),{{headers:AH}});
     const j=await r.json();
     if(!j.ok){{alert(j.razon||'No se pudo cargar el chofer');return;}}
     _curId=id;
@@ -1824,7 +2251,7 @@ async function guardar(){{
   if(!body.nombre||!body.telefono){{msg.textContent='Nombre y teléfono son obligatorios.';msg.style.color='#f87171';return;}}
   btn.disabled=true; btn.textContent='Guardando...';
   try{{
-    const r=await fetch('/api/v2/drivers/'+encodeURIComponent(_curId)+'/actualizar',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(body)}});
+    const r=await fetch('/api/v2/drivers/'+encodeURIComponent(_curId)+'/actualizar',{{method:'POST',headers:AH,body:JSON.stringify(body)}});
     const j=await r.json();
     if(j.ok){{msg.textContent='✅ Guardado. Recargando...';msg.style.color='#4ade80';setTimeout(()=>location.reload(),700);}}
     else{{msg.textContent='⚠️ '+(j.razon||'No se pudo guardar');msg.style.color='#f87171';btn.disabled=false;btn.textContent='Guardar cambios';}}
@@ -1884,7 +2311,7 @@ p{{color:#475569;max-width:320px}}
 </body></html>"""
 
 
-def _render_pasajero_qr_page(reserva: dict, token: str) -> str:
+def _render_pasajero_qr_page(reserva: dict, token: str, auto_start: bool = False) -> str:
     from html import escape as _esc
     from urllib.parse import quote as _q
     bid = _esc(str(reserva.get("booking_id", "")))
@@ -1894,7 +2321,10 @@ def _render_pasajero_qr_page(reserva: dict, token: str) -> str:
     origen = _esc(str(reserva.get("origen", "")))
     destino = _esc(str(reserva.get("destino", "")))
     pax = reserva.get("passengers", 0)
-    veh = _esc(str(reserva.get("vehicle_type", "")))
+    # Vehiculo REAL asignado (lo mismo que ve el cliente en su WhatsApp). Si aun
+    # no hay chofer asignado, se muestra la clase cotizada como respaldo.
+    veh = _esc(str(reserva.get("driver_vehicle") or reserva.get("vehicle_type", "")))
+    did = _esc(str(reserva.get("driver_id", "")))
     pago = _esc(str(reserva.get("payment_method", "")))
     pago_estado = _esc(str(reserva.get("payment_status", "")))
     cuando = _esc(str(reserva.get("service_time") or reserva.get("travel_date") or ""))
@@ -1917,20 +2347,165 @@ def _render_pasajero_qr_page(reserva: dict, token: str) -> str:
         "supervisor_review": ("#d97706", "EN REVISION"),
     }
     bcolor, btxt = badges.get(estado, ("#475569", (estado or "—").upper()))
-    cobro = f"<div class='cobro'>COBRAR EN EFECTIVO: RD${precio_fmt}</div>" if pago == "cash" else ""
-    if estado == "confirmed":
+    if pago == "cash":
+        cobro = f"<div class='cobro'>COBRAR EN EFECTIVO: RD${precio_fmt}</div>"
+    elif pago == "card":
+        cobro = f"<div class='cobro'>COBRAR CON TARJETA (DAT&Aacute;FONO): RD${precio_fmt}</div>"
+    else:
+        cobro = ""
+    if estado == "confirmed" and auto_start:
+        # El viaje SOLO se inicia ESCANEANDO el QR del cliente (g=1). El boton
+        # existe para el arranque automatico al escanear; el chofer no lo activa
+        # por su cuenta.
         accion = ("<button id='btnIniciar' class='btn-go' onclick='iniciar()'>Iniciar viaje</button>"
                   "<div id='msg'></div>")
+    elif estado == "confirmed":
+        # Vista del chofer (abrio su enlace, SIN escanear): SOLO LECTURA, sin
+        # boton de iniciar. El viaje arranca al escanear el QR del cliente, o si
+        # el cliente lo confirma desde su pantalla. Asi no se puede mal usar.
+        accion = ("<div class='encurso' style='background:#1e293b;color:#cbd5e1;font-weight:700'>"
+                  "Para iniciar, escanea el c&oacute;digo QR que te muestra el cliente.</div>")
     elif estado == "in_progress":
-        accion = "<div class='encurso'>Viaje en curso</div>"
+        accion = ("<div class='encurso'>Viaje en curso</div>"
+                  "<button id='btnFin' class='btn-end' onclick='finalizar()'>"
+                  "Finalizar viaje &mdash; Entregu&eacute; al cliente</button>"
+                  "<div id='msg'></div>")
     else:
         accion = ""
     nav = (f"<a class='btn-nav' href='{maps_url}' target='_blank'>Navegar recogida &rarr; destino</a>"
            if maps_url else "")
+    # Si se llegó ESCANEANDO el QR (?g=1) y la reserva está confirmada, el viaje
+    # se inicia solo con leer el QR — sin que el chofer pulse nada.
+    auto_js = ("if(document.getElementById('btnIniciar')){ setTimeout(function(){ try{ iniciar(); }catch(e){} }, 250); }"
+               if (auto_start and estado == "confirmed") else "")
 
-    return f"""<!doctype html><html lang='es'><head><meta charset='utf-8'>
+    # ── MAPA EMBEBIDO ───────────────────────────────────────────────
+    # Coordenadas de recogida y destino (se calculan una vez). Sirven para
+    # dibujar el mapa del viaje DENTRO de la hoja, sin abrir otra app.
+    try:
+        _pu = mvp_core._pickup_coords(str(reserva.get("booking_id", "")),
+                                      str(reserva.get("origen", "") or ""))
+    except Exception:
+        _pu = None
+    try:
+        _de = mvp_core._geocode_pickup(str(reserva.get("destino", "") or ""))
+    except Exception:
+        _de = None
+    _pu_js = f"[{_pu[0]},{_pu[1]}]" if _pu else "null"
+    _de_js = f"[{_de[0]},{_de[1]}]" if _de else "null"
+    # Si el viaje YA está en curso al abrir la hoja, el mapa se muestra solo.
+    _automap = "if(window.showMap){ showMap(); }" if estado == "in_progress" else ""
+
+    _map_head = "<link rel='stylesheet' href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css'/>"
+    _leaflet_js = "<script src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'></script>"
+    _map_card = ("<div id='mapCard' style='display:none;margin-top:12px'>"
+                 "<div class='lbl' style='margin-bottom:6px'>Mapa del viaje</div>"
+                 "<div id='emap' style='height:300px;border-radius:14px;overflow:hidden;background:#1e293b'></div>"
+                 "</div>")
+    _map_script_tpl = """<script>
+(function(){
+  var PU=__PU__, DE=__DE__, BID='__BID2__', TOK='__TOK2__';
+  var emap=null, carM=null, trackTimer=null;
+  var carIcon=L.divIcon({className:'',html:"<div style='font-size:30px;line-height:30px'>\\uD83D\\uDE96</div>",iconSize:[34,34],iconAnchor:[17,17]});
+  var pickIcon=L.divIcon({className:'',html:"<div style='font-size:28px;line-height:28px'>\\uD83D\\uDCCD</div>",iconSize:[28,32],iconAnchor:[14,30]});
+  var endIcon=L.divIcon({className:'',html:"<div style='font-size:28px;line-height:28px'>\\uD83C\\uDFC1</div>",iconSize:[28,32],iconAnchor:[14,30]});
+  function drawRoute(a,b){
+    // Traza la ruta del viaje. Orden de preferencia para que coincida con las
+    // calles reales: 1) Google Directions (misma fuente que ubica los puntos),
+    // 2) OSRM publico, 3) linea recta punteada si todo falla.
+    function recta(){ try{ L.polyline([a,b],{color:'#38bdf8',weight:4,dashArray:'8,8'}).addTo(emap); }catch(e){} }
+    function pinta(c){ try{ if(c&&c.length>1){ L.polyline(c,{color:'#38bdf8',weight:5,opacity:0.85}).addTo(emap); return true; } }catch(e){} return false; }
+    function osrm(){
+      try{
+        var url='https://router.project-osrm.org/route/v1/driving/'+a[1]+','+a[0]+';'+b[1]+','+b[0]+'?overview=full&geometries=geojson';
+        fetch(url).then(function(r){return r.json();}).then(function(j){
+          if(j&&j.routes&&j.routes[0]){ pinta(j.routes[0].geometry.coordinates.map(function(p){return [p[1],p[0]];})); }
+          else { recta(); }
+        }).catch(recta);
+      }catch(e){ recta(); }
+    }
+    try{
+      var g='/api/v2/ruta?olat='+a[0]+'&olng='+a[1]+'&dlat='+b[0]+'&dlng='+b[1];
+      fetch(g).then(function(r){return r.json();}).then(function(j){
+        if(j&&j.ok&&pinta(j.puntos)){ return; }
+        osrm();
+      }).catch(osrm);
+    }catch(e){ osrm(); }
+  }
+  function track(){
+    if(!emap) return;
+    fetch('/api/v2/track/'+encodeURIComponent(BID)+'?t='+encodeURIComponent(TOK)).then(function(r){return r.json();}).then(function(j){
+      if(!j||!j.ok) return;
+      if(j.driver_lat!=null&&j.driver_lng!=null){
+        var p=[j.driver_lat,j.driver_lng];
+        if(!carM){ carM=L.marker(p,{icon:carIcon}).addTo(emap); }
+        else{ carM.setLatLng(p); }
+      }
+    }).catch(function(){});
+  }
+  window.showMap=function(){
+    var card=document.getElementById('mapCard');
+    if(!card||emap) { if(emap){ setTimeout(function(){try{emap.invalidateSize();}catch(e){}},200);} return; }
+    card.style.display='block';
+    emap=L.map('emap',{zoomControl:true}).setView([18.4861,-69.9312],12);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'\\u00A9 OpenStreetMap'}).addTo(emap);
+    var pts=[];
+    if(PU){ L.marker(PU,{icon:pickIcon}).addTo(emap).bindPopup('Recogida'); pts.push(PU); }
+    if(DE){ L.marker(DE,{icon:endIcon}).addTo(emap).bindPopup('Destino'); pts.push(DE); }
+    if(PU&&DE){ drawRoute(PU,DE); }
+    if(pts.length){ try{ emap.fitBounds(L.latLngBounds(pts).pad(0.3)); }catch(e){} }
+    track(); trackTimer=setInterval(track,5000);
+    setTimeout(function(){ try{ emap.invalidateSize(); }catch(e){} },250);
+  };
+  window.clearMap=function(){
+    if(trackTimer){ clearInterval(trackTimer); trackTimer=null; }
+    if(emap){ try{ emap.remove(); }catch(e){} emap=null; carM=null; }
+    var card=document.getElementById('mapCard');
+    if(card){ card.style.display='none'; }
+  };
+  __AUTOMAP__
+})();
+</script>"""
+    _map_script = (_map_script_tpl
+                   .replace("__PU__", _pu_js)
+                   .replace("__DE__", _de_js)
+                   .replace("__BID2__", bid)
+                   .replace("__TOK2__", token)
+                   .replace("__AUTOMAP__", _automap))
+
+    # ── GPS DEL CHOFER DESDE LA HOJA ────────────────────────────────
+    # Mientras la reserva esta activa (confirmada o en curso), esta misma hoja
+    # comparte la ubicacion del chofer al servidor. Asi el cliente ve el taxi
+    # acercandose en su pagina de seguimiento SIN que el chofer abra otra pagina.
+    _activo_js = "true" if estado in ("confirmed", "in_progress") else "false"
+    _gps_script_tpl = """<script>
+(function(){
+  var DID='__DID__'; var DTOK='__DTOK__'; var activo=__ACTIVO__; var watchId=null;
+  function enviar(lat,lng){
+    try{ fetch('/api/v2/driver/gps',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({driver_id:DID,token:DTOK,lat:lat,lng:lng})}).catch(function(){}); }catch(e){}
+  }
+  window.iniciarGPS=function(){
+    if(!DID||watchId!=null||!navigator.geolocation) return;
+    try{ watchId=navigator.geolocation.watchPosition(
+      function(p){ enviar(p.coords.latitude,p.coords.longitude); },
+      function(){}, {enableHighAccuracy:true,maximumAge:5000,timeout:20000}); }catch(e){}
+  };
+  window.detenerGPS=function(){
+    if(watchId!=null&&navigator.geolocation){ try{navigator.geolocation.clearWatch(watchId);}catch(e){} watchId=null; }
+  };
+  if(activo){ window.iniciarGPS(); }
+})();
+</script>"""
+    _gps_script = (_gps_script_tpl
+                   .replace("__DID__", did)
+                   .replace("__DTOK__", mvp_core.firmar_driver(str(reserva.get("driver_id", ""))))
+                   .replace("__ACTIVO__", _activo_js))
+
+    _html = f"""<!doctype html><html lang='es'><head><meta charset='utf-8'>
 <meta name='viewport' content='width=device-width, initial-scale=1'>
 <title>Emovils — Hoja de servicio</title>
+__MAPHEAD__
 <style>
 body{{margin:0;background:#0f172a;color:#e2e8f0;font-family:-apple-system,Segoe UI,Roboto,sans-serif;padding:16px;max-width:520px;margin:0 auto}}
 .head{{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}}
@@ -1948,6 +2523,7 @@ a.tel{{color:#38bdf8;text-decoration:none}}
 .btn-go{{display:block;width:100%;background:#16a34a;color:#fff;border:none;padding:16px;border-radius:12px;font-size:18px;font-weight:800;margin-top:8px}}
 .btn-nav{{display:block;text-align:center;background:#2563eb;color:#fff;padding:14px;border-radius:12px;text-decoration:none;font-weight:700;margin-top:10px}}
 .encurso{{background:#166534;color:#fff;text-align:center;padding:14px;border-radius:12px;font-weight:800;margin-top:8px}}
+.btn-end{{display:block;width:100%;background:#4f46e5;color:#fff;border:none;padding:16px;border-radius:12px;font-size:18px;font-weight:800;margin-top:10px}}
 #msg{{text-align:center;margin-top:10px;font-weight:700}}
 </style></head><body>
 <div class='head'><div class='brand'>EMOVILS</div><div class='badge'>{btxt}</div></div>
@@ -1979,8 +2555,10 @@ a.tel{{color:#38bdf8;text-decoration:none}}
   <div class='val'>RD${precio_fmt} &middot; {pago} ({pago_estado})</div>
 </div>
 {cobro}
-{accion}
+<div id="accionWrap">{accion}</div>
+__MAPCARD__
 {nav}
+__LEAFLETJS__
 <script>
 async function iniciar(){{
   const b=document.getElementById('btnIniciar'); b.disabled=true; b.textContent='Iniciando...';
@@ -1988,12 +2566,41 @@ async function iniciar(){{
     const r=await fetch('/api/v2/mvp/reserva/{bid}/iniciar',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{token:'{token}'}})}});
     const j=await r.json();
     const m=document.getElementById('msg');
-    if(j.ok){{ m.style.color='#4ade80'; m.textContent='Viaje iniciado'; b.style.display='none'; }}
+    if(j.ok){{
+      m.style.color='#4ade80'; m.textContent='✅ Viaje iniciado'; b.style.display='none';
+      var w=document.getElementById('accionWrap');
+      if(w){{ w.innerHTML="<div class='encurso'>Viaje en curso</div><button id='btnFin' class='btn-end' onclick='finalizar()'>Finalizar viaje &mdash; Entregu&eacute; al cliente</button><div id='msg'></div>"; }}
+      try{{ if(window.showMap) showMap(); }}catch(e){{}}
+      try{{ if(window.iniciarGPS) iniciarGPS(); }}catch(e){{}}
+    }}
     else{{ m.style.color='#f87171'; m.textContent=(j.razon||'No se pudo iniciar'); b.disabled=false; b.textContent='Iniciar viaje'; }}
   }}catch(e){{ document.getElementById('msg').textContent='Error de conexion'; b.disabled=false; b.textContent='Iniciar viaje'; }}
 }}
+async function finalizar(){{
+  if(!confirm('¿Confirmas que entregaste al cliente en el destino? El viaje se cerrará y quedarás disponible.')) return;
+  const b=document.getElementById('btnFin'); b.disabled=true; b.textContent='Finalizando...';
+  try{{
+    const r=await fetch('/api/v2/dispatch/{bid}/completar',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{token:'{token}'}})}});
+    const j=await r.json();
+    const m=document.getElementById('msg');
+    if(j.ok){{ m.style.color='#4ade80'; m.textContent='✅ Viaje finalizado. Quedas disponible.'; b.style.display='none';
+      try{{ if(window.detenerGPS) detenerGPS(); }}catch(e){{}}
+      try{{ if(window.clearMap) clearMap(); }}catch(e){{}}
+    }}
+    else{{ m.style.color='#f87171'; m.textContent=(j.razon||'No se pudo finalizar'); b.disabled=false; b.textContent='Finalizar viaje'; }}
+  }}catch(e){{ document.getElementById('msg').textContent='Error de conexion'; b.disabled=false; b.textContent='Finalizar viaje'; }}
+}}
+{auto_js}
 </script>
+__MAPSCRIPT__
+__GPSSCRIPT__
 </body></html>"""
+    return (_html
+            .replace("__MAPHEAD__", _map_head)
+            .replace("__MAPCARD__", _map_card)
+            .replace("__LEAFLETJS__", _leaflet_js)
+            .replace("__MAPSCRIPT__", _map_script)
+            .replace("__GPSSCRIPT__", _gps_script))
 
 
 def _render_vehicle_verify_page(res: dict) -> str:

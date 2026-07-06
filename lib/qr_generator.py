@@ -9,7 +9,8 @@ import os
 
 logger = logging.getLogger(__name__)
 
-QRIO_API_KEY = os.getenv("QRIO_API_KEY", "pyvwUlSI1QFACKbD2WXu")
+# La clave viene SIEMPRE de la variable de entorno (nunca hardcodeada aquí).
+QRIO_API_KEY = os.getenv("QRIO_API_KEY", "")
 QRIO_BASE_URL = "https://api.qr.io/v1"
 BACKEND_URL = os.getenv("BACKEND_URL", "https://emovils-bot-v2-production.up.railway.app")
 

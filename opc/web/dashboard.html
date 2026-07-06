@@ -261,12 +261,15 @@
 </div>
 
 <script>
-const API_BASE = "http://localhost:5002";
+// Mismo origen que el servidor que sirve esta página (funciona en local y en Railway).
+const API_BASE = "";
+// Llave admin: llega en la URL como ?k=... y se reenvía en cada llamada a la API.
+const ADMIN_K = new URLSearchParams(location.search).get('k') || '';
 
 let chartHoras, chartCanales, chartFacturacion;
 
 async function api(path) {
-  const r = await fetch(`${API_BASE}${path}`);
+  const r = await fetch(`${API_BASE}${path}`, ADMIN_K ? { headers: { 'X-Admin-Token': ADMIN_K } } : undefined);
   return r.ok ? r.json() : null;
 }
 

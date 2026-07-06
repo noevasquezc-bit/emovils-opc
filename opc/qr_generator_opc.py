@@ -32,8 +32,24 @@ logger = logging.getLogger(__name__)
 # CONFIGURACIÓN
 # ─────────────────────────────────────────────────────────────
 
-# Secret para firmar QRs (se inyecta via env var en producción)
-QR_SECRET = os.getenv("EMOVILS_QR_SECRET", "emovils-dev-secret-change-in-prod")
+# Secret para firmar QRs. OBLIGATORIO en producción: sin una clave propia,
+# cualquiera podría falsificar un QR. Reutiliza QR_SIGNING_KEY si ya existe.
+# En local (sin Railway) se permite una clave de desarrollo insegura.
+QR_SECRET = (
+    os.getenv("EMOVILS_QR_SECRET", "").strip()
+    or os.getenv("QR_SIGNING_KEY", "").strip()
+)
+if not QR_SECRET:
+    _en_railway = bool(
+        os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_ENVIRONMENT_NAME")
+        or os.getenv("RAILWAY_PROJECT_ID") or os.getenv("RAILWAY_SERVICE_ID")
+    )
+    if _en_railway:
+        raise RuntimeError(
+            "EMOVILS_QR_SECRET (o QR_SIGNING_KEY) no está configurada. Es "
+            "obligatoria en producción para firmar los QR (ponla en Railway)."
+        )
+    QR_SECRET = "emovils-dev-secret-change-in-prod"
 
 # Tiempo de vida de un QR de servicio (después expira)
 QR_SERVICIO_TTL_HORAS = 24

@@ -347,7 +347,10 @@
 </div>
 
 <script>
-const API_BASE = "http://localhost:5002";
+// Mismo origen que el servidor que sirve esta página (funciona en local y en Railway).
+const API_BASE = "";
+// Llave admin: llega en la URL como ?k=... y se reenvía en cada llamada a la API.
+const ADMIN_K = new URLSearchParams(location.search).get('k') || '';
 
 function cambiarTab(tipo) {
   document.querySelectorAll('.tab').forEach((t, i) => {
@@ -421,7 +424,7 @@ async function enviarConductor() {
     mostrarMensaje('conductor-message', '⏳ Guardando...', 'info');
     const r = await fetch(`${API_BASE}/api/v2/conductor/crear`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Admin-Token': ADMIN_K },
       body: JSON.stringify(datos),
     });
     const result = await r.json();
@@ -474,7 +477,7 @@ async function enviarVehiculo() {
     mostrarMensaje('vehiculo-message', '⏳ Guardando...', 'info');
     const r = await fetch(`${API_BASE}/api/v2/vehiculo/crear`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Admin-Token': ADMIN_K },
       body: JSON.stringify(datos),
     });
     const result = await r.json();
