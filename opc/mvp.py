@@ -98,8 +98,26 @@ _AEROPUERTO_KEYWORDS = (
     "aila", "aeropuerto", "airport", "sdq", "terminal aerea", "terminal aérea",
 )
 
-# Token HMAC firma QR (deberia estar en env var)
-QR_SIGNING_KEY = os.getenv("QR_SIGNING_KEY", "emovils-mvp-2026-default-CHANGE-IN-PROD")
+def _es_entorno_produccion() -> bool:
+    """True si corremos en el servidor (Railway), no en una laptop local.
+    Railway siempre inyecta estas variables de sistema; en local no existen."""
+    return bool(
+        os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_ENVIRONMENT_NAME")
+        or os.getenv("RAILWAY_PROJECT_ID") or os.getenv("RAILWAY_SERVICE_ID")
+    )
+
+
+# Token HMAC que firma los QR de viaje. OBLIGATORIO en producción: sin una clave
+# secreta propia (puesta en Railway), cualquiera podría falsificar un token e
+# iniciar viajes. En local se permite una clave de desarrollo insegura.
+QR_SIGNING_KEY = os.getenv("QR_SIGNING_KEY", "").strip()
+if not QR_SIGNING_KEY:
+    if _es_entorno_produccion():
+        raise RuntimeError(
+            "QR_SIGNING_KEY no está configurada. Es obligatoria en producción "
+            "para firmar los QR de viaje de forma segura (ponla en Railway)."
+        )
+    QR_SIGNING_KEY = "dev-only-insecure-qr-key-no-usar-en-produccion"
 
 # Base URL del sistema (para verification_url en QRs)
 PUBLIC_BASE_URL = os.getenv("BACKEND_URL", "https://emovils-opc-production.up.railway.app")
@@ -546,9 +564,38 @@ def validar_token_vehiculo(vehicle_id: str, token: str) -> bool:
         return False
 
 
+def firmar_driver(driver_id: str) -> str:
+    """Token-capacidad del chofer: prueba que recibió su enlace oficial.
+    Es estable por chofer (el mismo enlace sirve toda su jornada) y nadie puede
+    falsificarlo sin la llave secreta. Lo usan la página de GPS y la de
+    disponibilidad para que solo el chofer real reporte su ubicación/estado."""
+    return _firmar("driver:" + str(driver_id or ""))
+
+
+def validar_token_driver(driver_id: str, token: str) -> bool:
+    """Verifica el token-capacidad del chofer (comparación a prueba de timing)."""
+    try:
+        return hmac.compare_digest(str(token or ""), firmar_driver(driver_id))
+    except Exception:
+        return False
+
+
 # ═══════════════════════════════════════════════════════════════
 # AIRTABLE CRUD (directo, sin dependencia de modulos viejos)
 # ═══════════════════════════════════════════════════════════════
+
+# Sanea un valor antes de interpolarlo en una fórmula de Airtable
+# (filterByFormula). Todos los valores que buscamos son identificadores
+# (booking_id, driver_id, vehicle_id, teléfono, tipo, estado) que NUNCA llevan
+# comillas, llaves ni paréntesis; quitar esos caracteres neutraliza cualquier
+# intento de "colar" texto para alterar la búsqueda y leer datos de otros
+# clientes, sin afectar los datos legítimos.
+_AF_NO_SEGUROS = re.compile(r"[^A-Za-z0-9 _.\-+:@]")
+
+
+def _af(valor) -> str:
+    return _AF_NO_SEGUROS.sub("", str(valor if valor is not None else ""))
+
 
 def _at_get(tabla: str, formula: str = "", max_records: int = 100) -> list[dict]:
     params = {"maxRecords": max_records}
@@ -731,7 +778,7 @@ def asignar_conductor_y_vehiculo(booking_id: str, vehicle_type: str) -> dict:
                 continue
             drivers = _at_get(
                 "Drivers",
-                formula=f"AND({{driver_id}}='{driver_id}', {{driver_status}}='available')",
+                formula=f"AND({{driver_id}}='{_af(driver_id)}', {{driver_status}}='available')",
                 max_records=1,
             )
             if not drivers:
@@ -739,7 +786,7 @@ def asignar_conductor_y_vehiculo(booking_id: str, vehicle_type: str) -> dict:
 
             d = drivers[0]
             df = d["fields"]
-            booking = _at_get("Bookings", formula=f"{{Booking_ID}}='{booking_id}'", max_records=1)
+            booking = _at_get("Bookings", formula=f"{{Booking_ID}}='{_af(booking_id)}'", max_records=1)
             if not booking:
                 return {"asignado": False, "razon": f"Booking {booking_id} no existe"}
 
@@ -767,7 +814,7 @@ def asignar_conductor_y_vehiculo(booking_id: str, vehicle_type: str) -> dict:
     # 1) Intentar por el tipo solicitado
     typed = _at_get(
         "Vehicles",
-        formula=f"AND({{vehicle_type}}='{vehicle_type}', {{vehicle_status}}='active')",
+        formula=f"AND({{vehicle_type}}='{_af(vehicle_type)}', {{vehicle_status}}='active')",
         max_records=10,
     )
     res = _intentar(typed)
@@ -1041,14 +1088,21 @@ def actualizar_ubicacion_chofer(driver_phone: str, lat: float, lng: float) -> di
 def actualizar_ubicacion_chofer_por_id(driver_id: str, lat: float, lng: float) -> dict:
     """Igual que actualizar_ubicacion_chofer pero identifica al chofer por su
     driver_id. Lo usa la pagina GPS del navegador (manda posicion cada 3-5 s)."""
-    drivers = _at_get("Drivers", formula=f"{{driver_id}}='{driver_id}'", max_records=1)
+    drivers = _at_get("Drivers", formula=f"{{driver_id}}='{_af(driver_id)}'", max_records=1)
     if not drivers:
         return {"ok": False, "razon": "chofer no encontrado"}
     d = drivers[0]
     df = d["fields"]
     estado = df.get("driver_status")
-    # Mientras manda GPS queda EN LINEA (available), salvo suspendido o en carrera.
-    nuevo = estado if estado in ("suspended", "busy") else "available"
+    # El GPS de la pagina corre en SEGUNDO PLANO: solo refresca la posicion, NO
+    # debe cambiar el estado del chofer. En particular NO debe REVIVIR a un chofer
+    # que se desconecto (offline) ni sacar de 'suspended'/'busy'. Para volver a EN
+    # LINEA el chofer debe marcarse disponible en su panel o compartir su ubicacion
+    # por WhatsApp a proposito (eso si es una accion deliberada). Antes esta funcion
+    # ponia 'available' a cualquiera que no fuera suspended/busy, asi que un chofer
+    # offline con la pagina abierta "volvia solo" y le entraban carreras sin estar
+    # en linea. Por eso 'offline' ahora se respeta.
+    nuevo = estado if estado in ("suspended", "busy", "offline") else "available"
     _at_update("Drivers", d["id"], {
         "current_lat": float(lat),
         "current_lng": float(lng),
@@ -1061,7 +1115,7 @@ def actualizar_ubicacion_chofer_por_id(driver_id: str, lat: float, lng: float) -
 
 def cambiar_disponibilidad_chofer(driver_id: str, disponible: bool) -> dict:
     """Panel web del chofer: marcarse 'No disponible' (offline) o volver."""
-    drivers = _at_get("Drivers", formula=f"{{driver_id}}='{driver_id}'", max_records=1)
+    drivers = _at_get("Drivers", formula=f"{{driver_id}}='{_af(driver_id)}'", max_records=1)
     if not drivers:
         return {"ok": False, "razon": "chofer no encontrado"}
     nuevo = "available" if disponible else "offline"
@@ -1159,14 +1213,14 @@ def listar_choferes() -> list[dict]:
 
 def obtener_chofer(driver_id: str) -> dict:
     """Datos completos del chofer + su vehiculo (para el formulario de edicion)."""
-    ds = _at_get("Drivers", formula=f"{{driver_id}}='{driver_id}'", max_records=1)
+    ds = _at_get("Drivers", formula=f"{{driver_id}}='{_af(driver_id)}'", max_records=1)
     if not ds:
         return {"ok": False, "razon": "Chofer no encontrado."}
     df = ds[0]["fields"]
     veh_id = df.get("assigned_vehicle_id", "") or ""
     vf = {}
     if veh_id:
-        vs = _at_get("Vehicles", formula=f"{{vehicle_id}}='{veh_id}'", max_records=1)
+        vs = _at_get("Vehicles", formula=f"{{vehicle_id}}='{_af(veh_id)}'", max_records=1)
         if vs:
             vf = vs[0]["fields"]
     return {
@@ -1191,7 +1245,7 @@ def actualizar_chofer(driver_id: str, nombre=None, telefono=None, driver_type=No
                       driver_status=None, vehiculo_tipo=None, placa=None, marca=None,
                       modelo=None, color=None, anio=None, max_pax=None) -> dict:
     """Edita los campos de un chofer y/o de su vehiculo desde el dashboard."""
-    ds = _at_get("Drivers", formula=f"{{driver_id}}='{driver_id}'", max_records=1)
+    ds = _at_get("Drivers", formula=f"{{driver_id}}='{_af(driver_id)}'", max_records=1)
     if not ds:
         return {"ok": False, "razon": "Chofer no encontrado."}
     drec = ds[0]
@@ -1243,7 +1297,7 @@ def actualizar_chofer(driver_id: str, nombre=None, telefono=None, driver_type=No
         _at_update("Drivers", drec["id"], dfields)
     veh_id = df.get("assigned_vehicle_id", "") or ""
     if vfields and veh_id:
-        vs = _at_get("Vehicles", formula=f"{{vehicle_id}}='{veh_id}'", max_records=1)
+        vs = _at_get("Vehicles", formula=f"{{vehicle_id}}='{_af(veh_id)}'", max_records=1)
         if vs:
             vfields["updated_at"] = now
             _at_update("Vehicles", vs[0]["id"], vfields)
@@ -1368,14 +1422,14 @@ def _avisar_sin_choferes(booking_rec: dict) -> None:
     cliente = bf.get("customer_phone", "") or ""
     try:
         from opc.whatsapp_green_api import enviar_a_cliente
-        # 1) Mensaje HONESTO al cliente (no se promete un chofer que no existe).
+        # 1) Mensaje TRANQUILO al cliente: no se le dice "no hay choferes", se le
+        # avisa que un supervisor está coordinando su servicio y lo contactará.
         if cliente:
             enviar_a_cliente(
                 cliente,
-                "🙏 Disculpa la demora. En este momento *no tenemos choferes "
-                "disponibles en tu zona*.\n\n"
-                "Ya estamos pasando tu solicitud a un supervisor, que te va a "
-                "contactar personalmente para ayudarte. Gracias por tu paciencia. 💙"
+                "🙏 Gracias por tu paciencia. Estamos *coordinando tu servicio* "
+                "con un supervisor, que te va a contactar enseguida para "
+                "confirmarte los detalles de tu viaje. 💙"
             )
         # 2) Escalar a un supervisor/dueño para que llame al cliente.
         owner = os.getenv("OWNER_WHATSAPP", "+18298610090")
@@ -1450,14 +1504,14 @@ def _despachar_siguiente(booking_rec: dict) -> dict:
 
 def iniciar_despacho(booking_id: str) -> dict:
     """Arranca la busqueda del chofer mas cercano para una reserva."""
-    bk = _at_get("Bookings", formula=f"{{Booking_ID}}='{booking_id}'", max_records=1)
+    bk = _at_get("Bookings", formula=f"{{Booking_ID}}='{_af(booking_id)}'", max_records=1)
     if not bk:
         return {"ok": False, "razon": "booking no existe"}
     return _despachar_siguiente(bk[0])
 
 
 def _reofrecer(booking_id: str) -> dict:
-    bk = _at_get("Bookings", formula=f"{{Booking_ID}}='{booking_id}'", max_records=1)
+    bk = _at_get("Bookings", formula=f"{{Booking_ID}}='{_af(booking_id)}'", max_records=1)
     if not bk:
         return {"ok": False, "razon": "booking no existe"}
     return _despachar_siguiente(bk[0])
@@ -1470,7 +1524,7 @@ def _aceptar_oferta(booking: dict, driver: dict) -> dict:
     veh_id = df.get("assigned_vehicle_id", "")
     vf = {}
     if veh_id:
-        veh = _at_get("Vehicles", formula=f"{{vehicle_id}}='{veh_id}'", max_records=1)
+        veh = _at_get("Vehicles", formula=f"{{vehicle_id}}='{_af(veh_id)}'", max_records=1)
         vf = veh[0]["fields"] if veh else {}
 
     pickup_dt = _booking_pickup_dt(bf)
@@ -1527,15 +1581,22 @@ def _aceptar_oferta(booking: dict, driver: dict) -> dict:
             # Inmediato: el chofer va en camino. Avisamos a AMBOS con el tiempo
             # estimado de llegada (ETA) y los codigos QR del viaje.
             bid = bf.get("Booking_ID", "")
-            eta_min, _dist_m = _eta_chofer_a_pickup(bf, df)
+            # ETA: releer la ficha del chofer para usar su ubicacion MAS reciente
+            # (el GPS pudo refrescarse despues de enviar la oferta). Asi el cliente
+            # casi siempre recibe el tiempo estimado de llegada.
+            df_eta = df
+            try:
+                _dd = _at_get("Drivers", formula=f"{{driver_id}}='{_af(did)}'", max_records=1)
+                if _dd:
+                    df_eta = _dd[0]["fields"]
+            except Exception:
+                pass
+            eta_min, _dist_m = _eta_chofer_a_pickup(bf, df_eta)
             eta_cli = f"⏱️ Llega en ~{eta_min} min\n" if eta_min else ""
             qr_tok = bf.get("customer_qr_token", "")
-            # Link al QR del pasajero (lo muestra para que el chofer lo escanee).
-            qr_cli = (f"{PUBLIC_BASE_URL}/qr/cliente/{bid}/ver?t={qr_tok}"
-                      if qr_tok else "")
             # ── CLIENTE: chofer en camino + ETA + seguimiento en vivo + su QR ──
             if cust:
-                link = f"{PUBLIC_BASE_URL}/seguir/{bid}"
+                link = f"{PUBLIC_BASE_URL}/seguir/{bid}?t={qr_tok}"
                 _wa_cli(
                     cust,
                     "✅ *¡Tu Emovils va en camino!* 🚖\n\n"
@@ -1544,12 +1605,35 @@ def _aceptar_oferta(booking: dict, driver: dict) -> dict:
                     + (f"🔖 Placa {placa}\n" if placa else "")
                     + (f"📱 {df.get('driver_phone','')}\n" if df.get("driver_phone") else "")
                     + eta_cli
-                    + f"\n📍 Síguelo en vivo aquí:\n{link}\n"
-                    + (f"\n🔗 Tu código del viaje (muéstralo al chofer):\n{qr_cli}\n"
-                       if qr_cli else "")
+                    + f"\n📍 *Sigue tu taxi EN VIVO aquí* (verás cómo se acerca):\n{link}\n"
                     + "\n🛡️ Cuando llegue el auto, escanea el QR pegado en su "
                       "lateral para confirmar que es tu Emovils.\n\n"
                       "Te avisaremos con un sonido cuando esté a 100 metros.")
+                # ── CLIENTE: además del texto, enviarle la IMAGEN del QR ──
+                # Es lo que el chofer ESCANEA para abrir la hoja e iniciar el
+                # viaje. Antes solo iba un enlace (no un QR), el chofer no tenía
+                # nada que escanear y por eso el viaje nunca arrancaba (ni se
+                # podía finalizar).
+                if qr_tok:
+                    try:
+                        import tempfile, os as _os
+                        from opc.whatsapp_green_api import get_client as _wa_client
+                        _hoja_qr = f"{PUBLIC_BASE_URL}/qr/cliente/{bid}?t={qr_tok}&g=1"
+                        _png = generar_qr_png(_hoja_qr, box_size=12, border=3)
+                        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as _tf:
+                            _tf.write(_png)
+                            _qr_path = _tf.name
+                        _wa_client().enviar_archivo(
+                            cust, _qr_path,
+                            caption=("📲 *Tu código del viaje.* Cuando llegue tu "
+                                     "Emovils, muéstrale ESTA imagen al chofer para "
+                                     "que la escanee e inicie tu viaje."))
+                        try:
+                            _os.unlink(_qr_path)
+                        except OSError:
+                            pass
+                    except Exception as _qe:
+                        logger.warning("No se pudo enviar imagen QR al cliente: %s", _qe)
             # ── CHOFER: hoja de servicio + datos del cliente + ETA + navegacion ──
             drv_phone = df.get("driver_phone", "")
             if drv_phone:
@@ -1569,12 +1653,13 @@ def _aceptar_oferta(booking: dict, driver: dict) -> dict:
                     f"👥 {bf.get('Passengers','')}  ·  💵 RD${bf.get('final_price',0)} "
                     f"({bf.get('payment_method','')})\n"
                     + (f"\n🧭 Navegar a la recogida:\n{maps_nav}\n" if maps_nav else "")
-                    + (f"\n📋 Hoja de servicio (ábrela y pulsa “Iniciar viaje”):\n{hoja}\n"
+                    + (f"\n📋 Hoja de servicio (datos del viaje y navegación):\n{hoja}\n"
                        if hoja else "")
                     + (f"\n🔳 QR de tu vehículo (muéstralo / pégalo para el cliente):\n{qr_veh}\n"
                        if qr_veh else "")
-                    + "\n✅ Al recoger al cliente, escanea SU código (o abre la hoja) "
-                      "y pulsa “Iniciar viaje”.")
+                    + "\n✅ Al recoger al cliente, escanea SU código QR para iniciar "
+                      "el viaje. (Si el QR no abre, el cliente puede iniciarlo desde "
+                      "su pantalla.)")
     except Exception as _e:
         logger.warning("Aviso (aceptacion) fallo: %s", _e)
 
@@ -1640,9 +1725,17 @@ def responder_oferta(driver_phone: str, texto: str) -> dict:
     rechaza = (t.startswith("rechazo") or t.startswith("cancel") or t.startswith("declin")
                or t in {"no", "paso", "rechazar", "no puedo", "nel"})
 
+    # DEFENSA: un chofer DESCONECTADO (offline) o suspendido NO puede tomar una
+    # carrera, aunque le hubiera llegado una oferta justo antes de desconectarse.
+    # Asi un viaje nunca "entra" a un chofer que no esta EN LINEA. Para tomar
+    # carreras debe primero ponerse disponible en su panel (o compartir ubicacion).
+    estado_drv = d["fields"].get("driver_status")
+    if acepta and not rechaza and estado_drv in ("offline", "suspended"):
+        return {"ok": False, "es_chofer": True, "razon": "chofer_desconectado"}
+
     # 1) Oferta EN VUELO (offer_status='offered'): la via normal.
     bks = _at_get("Bookings",
-                  formula=f"AND({{offered_driver_id}}='{did}', {{offer_status}}='offered')",
+                  formula=f"AND({{offered_driver_id}}='{_af(did)}', {{offer_status}}='offered')",
                   max_records=1)
     if bks:
         booking = bks[0]
@@ -1659,10 +1752,27 @@ def responder_oferta(driver_phone: str, texto: str) -> dict:
     # 2) Sin oferta en vuelo: ¿declina un servicio AGENDADO que ya aceptó?
     if rechaza:
         ag = _at_get("Bookings",
-                     formula=f"AND({{driver_id}}='{did}', {{offer_status}}='accepted')",
+                     formula=f"AND({{driver_id}}='{_af(did)}', {{offer_status}}='accepted')",
                      max_records=1)
         if ag and _booking_es_futuro(ag[0]["fields"]):
             return _declinar_agendada(ag[0], did)
+
+    # 3) ACEPTACIÓN TARDÍA: el chofer dijo "Acepto" después de que su oferta
+    # venció, PERO la carrera sigue libre (nadie más la tomó). En vez de
+    # bloquearlo, volvemos a revisar: si el viaje todavía no tiene chofer, se lo
+    # asignamos a él. Así no se pierde un servicio por unos segundos de retraso.
+    if acepta and not rechaza:
+        token = f"-> {did} "
+        libres = _at_get(
+            "Bookings",
+            formula=(f"AND(FIND('{token}', {{offer_log}}), {{driver_id}}='', "
+                     f"NOT({{booking_status}}='cancelled'), "
+                     f"NOT({{booking_status}}='completed'), "
+                     f"NOT({{booking_status}}='in_progress'), "
+                     f"NOT({{offer_status}}='offered'))"),
+            max_records=1)
+        if libres and not (libres[0]["fields"].get("driver_id") or "").strip():
+            return _aceptar_oferta(libres[0], d)
 
     return {"ok": False, "es_chofer": True, "razon": "no_oferta_vigente"}
 
@@ -1671,7 +1781,7 @@ def completar_viaje(booking_id: str) -> dict:
     """Cierra una carrera: reserva -> completed y el chofer vuelve a 'available'
     (EN LINEA), listo para la siguiente. Cumple el modelo 'siempre en linea':
     el chofer solo deja de estar disponible si se desconecta en la web."""
-    bk = _at_get("Bookings", formula=f"{{Booking_ID}}='{booking_id}'", max_records=1)
+    bk = _at_get("Bookings", formula=f"{{Booking_ID}}='{_af(booking_id)}'", max_records=1)
     if not bk:
         return {"ok": False, "razon": "booking no existe"}
     booking = bk[0]
@@ -1686,7 +1796,7 @@ def completar_viaje(booking_id: str) -> dict:
     })
     driver_status = None
     if did:
-        drv = _at_get("Drivers", formula=f"{{driver_id}}='{did}'", max_records=1)
+        drv = _at_get("Drivers", formula=f"{{driver_id}}='{_af(did)}'", max_records=1)
         if drv:
             est = drv[0]["fields"].get("driver_status")
             # Vuelve a EN LINEA salvo que se haya desconectado (offline) o este suspendido.
@@ -1718,7 +1828,7 @@ def chofer_finaliza_viaje(driver_phone: str, texto: str) -> dict:
     if not es_fin:
         return {"ok": False, "es_chofer": True, "es_completar": False}
     bks = _at_get("Bookings",
-                  formula=f"AND({{driver_id}}='{did}', {{booking_status}}='in_progress')",
+                  formula=f"AND({{driver_id}}='{_af(did)}', {{booking_status}}='in_progress')",
                   max_records=1)
     if not bks:
         return {"ok": False, "es_chofer": True, "es_completar": False,
@@ -1769,7 +1879,7 @@ def _enviar_recordatorio_chofer(booking: dict) -> bool:
     phone = bf.get("Driver_Phone", "") or ""
     if not phone:
         did = bf.get("driver_id", "")
-        drv = _at_get("Drivers", formula=f"{{driver_id}}='{did}'", max_records=1) if did else []
+        drv = _at_get("Drivers", formula=f"{{driver_id}}='{_af(did)}'", max_records=1) if did else []
         phone = drv[0]["fields"].get("driver_phone", "") if drv else ""
     if not phone:
         return False
@@ -1857,7 +1967,7 @@ def _eta_chofer_a_pickup(bf: dict, df: dict):
 def estado_seguimiento(booking_id: str) -> dict:
     """Datos para la pagina de seguimiento del pasajero: posicion del chofer,
     punto de recogida, distancia en metros y minutos estimados de llegada."""
-    bk = _at_get("Bookings", formula=f"{{Booking_ID}}='{booking_id}'", max_records=1)
+    bk = _at_get("Bookings", formula=f"{{Booking_ID}}='{_af(booking_id)}'", max_records=1)
     if not bk:
         return {"ok": False, "razon": "Reserva no encontrada."}
     bf = bk[0]["fields"]
@@ -1883,7 +1993,7 @@ def estado_seguimiento(booking_id: str) -> dict:
         "ubic_actualizada": None,
     }
     if did:
-        ds = _at_get("Drivers", formula=f"{{driver_id}}='{did}'", max_records=1)
+        ds = _at_get("Drivers", formula=f"{{driver_id}}='{_af(did)}'", max_records=1)
         if ds:
             dff = ds[0]["fields"]
             dlat, dlng = dff.get("current_lat"), dff.get("current_lng")
@@ -1965,7 +2075,7 @@ def estado_flota() -> dict:
 
 def estado_despacho(booking_id: str) -> dict:
     """Inspecciona el estado de despacho de una reserva (para pruebas)."""
-    bk = _at_get("Bookings", formula=f"{{Booking_ID}}='{booking_id}'", max_records=1)
+    bk = _at_get("Bookings", formula=f"{{Booking_ID}}='{_af(booking_id)}'", max_records=1)
     if not bk:
         return {"ok": False, "razon": "no existe"}
     bf = bk[0]["fields"]
@@ -1993,7 +2103,7 @@ def verificar_qr_vehiculo(vehicle_id: str, token: str) -> dict:
                           notes="Token invalido")
         return {"color": "red", "razon": "QR invalido"}
 
-    vehiculos = _at_get("Vehicles", formula=f"{{vehicle_id}}='{vehicle_id}'", max_records=1)
+    vehiculos = _at_get("Vehicles", formula=f"{{vehicle_id}}='{_af(vehicle_id)}'", max_records=1)
     if not vehiculos:
         _log_verification(None, vehicle_id, None, "client_scans_vehicle", "red",
                           notes="Vehiculo no existe")
@@ -2008,7 +2118,7 @@ def verificar_qr_vehiculo(vehicle_id: str, token: str) -> dict:
     # Buscar la reserva confirmada actual de este vehiculo
     bookings = _at_get(
         "Bookings",
-        formula=f"AND({{vehicle_id}}='{vehicle_id}', OR({{booking_status}}='confirmed', {{booking_status}}='in_progress'))",
+        formula=f"AND({{vehicle_id}}='{_af(vehicle_id)}', OR({{booking_status}}='confirmed', {{booking_status}}='in_progress'))",
         max_records=5,
     )
     if not bookings:
@@ -2033,7 +2143,7 @@ def verificar_qr_vehiculo(vehicle_id: str, token: str) -> dict:
                           notes="Sin chofer asignado")
         return {"color": "yellow", "razon": "Sin chofer asignado a la reserva"}
 
-    drivers = _at_get("Drivers", formula=f"{{driver_id}}='{driver_id}'", max_records=1)
+    drivers = _at_get("Drivers", formula=f"{{driver_id}}='{_af(driver_id)}'", max_records=1)
     if not drivers:
         return {"color": "red", "razon": "Chofer no registrado"}
     df = drivers[0]["fields"]
@@ -2076,7 +2186,7 @@ def verificar_qr_cliente(booking_id: str, token: str, driver_id: str) -> dict:
                           notes="Token invalido")
         return {"ok": False, "razon": "QR invalido o falsificado"}
 
-    bookings = _at_get("Bookings", formula=f"{{Booking_ID}}='{booking_id}'", max_records=1)
+    bookings = _at_get("Bookings", formula=f"{{Booking_ID}}='{_af(booking_id)}'", max_records=1)
     if not bookings:
         return {"ok": False, "razon": "Reserva no encontrada"}
     booking = bookings[0]
@@ -2130,7 +2240,7 @@ def iniciar_viaje(booking_id: str, token: str) -> dict:
     """
     if not validar_token_cliente(booking_id, token):
         return {"ok": False, "razon": "QR invalido o falsificado"}
-    bookings = _at_get("Bookings", formula=f"{{Booking_ID}}='{booking_id}'", max_records=1)
+    bookings = _at_get("Bookings", formula=f"{{Booking_ID}}='{_af(booking_id)}'", max_records=1)
     if not bookings:
         return {"ok": False, "razon": "Reserva no encontrada"}
     booking = bookings[0]
@@ -2184,7 +2294,7 @@ def reservas_conductor(driver_id: str) -> list[dict]:
     """Reservas asignadas a un chofer en estado activo."""
     bookings = _at_get(
         "Bookings",
-        formula=f"AND({{driver_id}}='{driver_id}', OR({{booking_status}}='confirmed', {{booking_status}}='in_progress'))",
+        formula=f"AND({{driver_id}}='{_af(driver_id)}', OR({{booking_status}}='confirmed', {{booking_status}}='in_progress'))",
         max_records=20,
     )
     out = []
@@ -2214,7 +2324,7 @@ def reservas_conductor(driver_id: str) -> list[dict]:
 
 
 def obtener_reserva(booking_id: str) -> Optional[dict]:
-    bookings = _at_get("Bookings", formula=f"{{Booking_ID}}='{booking_id}'", max_records=1)
+    bookings = _at_get("Bookings", formula=f"{{Booking_ID}}='{_af(booking_id)}'", max_records=1)
     if not bookings:
         return None
     bf = bookings[0]["fields"]

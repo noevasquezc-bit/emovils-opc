@@ -39,13 +39,20 @@ _PBKDF2_ITER = 200_000   # iteraciones de cifrado de la contraseña
 _CODE_TTL_MIN = 15       # minutos de validez del código de recuperación
 _TOKEN_DAYS = 30         # días de validez de la sesión
 
-# Clave para firmar tokens y códigos. En producción se pone AUTH_SECRET en el
-# servidor; si no, reutiliza la clave que ya existe para los QR.
+# Clave para firmar tokens de sesión y códigos. OBLIGATORIA en producción: si no,
+# reutiliza la de los QR (que ya es obligatoria en prod). En local, como último
+# recurso, usa una clave de desarrollo insegura.
 _AUTH_SECRET = (
-    os.getenv("AUTH_SECRET")
-    or os.getenv("QR_SIGNING_KEY")
-    or "emovils-auth-2026-default-CHANGE-IN-PROD"
+    os.getenv("AUTH_SECRET", "").strip()
+    or os.getenv("QR_SIGNING_KEY", "").strip()
 )
+if not _AUTH_SECRET:
+    if mvp._es_entorno_produccion():
+        raise RuntimeError(
+            "AUTH_SECRET (o QR_SIGNING_KEY) no está configurada. Es obligatoria "
+            "en producción para firmar las sesiones de forma segura."
+        )
+    _AUTH_SECRET = "dev-only-insecure-auth-key-no-usar-en-produccion"
 
 
 # ═══════════════════════════════════════════════════════════════

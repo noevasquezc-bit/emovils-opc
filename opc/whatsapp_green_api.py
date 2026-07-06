@@ -141,11 +141,23 @@ class GreenAPIClient:
         return bool(self.base_url and self.token)
 
     def _format_chat_id(self, numero: str) -> str:
-        """Limpia el número y le agrega @c.us para Green API."""
-        n = numero.strip().replace("+", "").replace("-", "").replace(" ", "").replace("(", "").replace(")", "")
-        if not n.endswith("@c.us"):
-            return f"{n}@c.us"
-        return n
+        """Limpia el número y le agrega @c.us para Green API.
+
+        WhatsApp EXIGE el código de país. Los números dominicanos guardados con
+        10 dígitos (ej. 8492593944) Green API los rechaza con "chatId inválido"
+        y el mensaje NUNCA llega: por eso el cliente se quedaba esperando los
+        datos del chofer. A esos se les antepone el '1' de RD. Los que ya traen
+        país (1809/1829/1849…, +1…, u otro país) se respetan tal cual.
+        """
+        n = numero.strip()
+        if n.endswith("@c.us"):
+            return n
+        # Dejar solo dígitos (quita +, -, espacios, paréntesis).
+        digitos = "".join(c for c in n if c.isdigit())
+        # RD con 10 dígitos (809/829/849) sin código de país -> anteponer el '1'.
+        if len(digitos) == 10 and digitos[:3] in ("809", "829", "849"):
+            digitos = "1" + digitos
+        return f"{digitos}@c.us"
 
     def _post(self, accion: str, body: dict) -> dict:
         url = f"{self.base_url}/{accion}/{self.token}"

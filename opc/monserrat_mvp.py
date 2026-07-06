@@ -128,8 +128,10 @@ FLUJO DE RESERVA (sigue el orden, no te saltes pasos)
 ═══════════════════════════════════════════════════════
 1) Tras la cotización, pregunta si desea confirmar la reserva.
 2) Cuando el cliente confirme → pregunta la forma de pago:
-   "¿Cómo desea realizar el pago: efectivo, con tarjeta o en línea?"
-   (Opciones válidas: efectivo, tarjeta, en línea. No confirmes la reserva sin forma de pago.)
+   "¿Cómo desea realizar el pago: en efectivo o con tarjeta?"
+   (Opciones válidas: efectivo, tarjeta. El pago con tarjeta se cobra EN EL VIAJE con el
+    datáfono del chofer. Por ahora NO ofrezcas pago en línea. No confirmes la reserva sin
+    forma de pago.)
 3) Después de la forma de pago → solicita el nombre:
    "Para continuar, por favor indíqueme el nombre completo de la persona que abordará el servicio."
 4) Después del nombre → solicita el teléfono explicando su uso:
@@ -173,7 +175,7 @@ Fecha: [fecha]
 Hora: [hora]
 Pasajeros: [cantidad]
 Precio: RD$[monto]
-Forma de pago: [efectivo/tarjeta/en línea]
+Forma de pago: [efectivo/tarjeta]
 Código de reserva: [booking_id]
 
 Le compartimos su código QR de servicio: [qr_url]
@@ -274,7 +276,7 @@ HERRAMIENTAS_MVP = [
                 "destination": {"type": "string"},
                 "passengers": {"type": "integer"},
                 "final_price": {"type": "integer"},
-                "payment_method": {"type": "string", "enum": ["cash", "card", "online"]},
+                "payment_method": {"type": "string", "enum": ["cash", "card"]},
                 "vehicle_type": {"type": "string", "enum": ["Van Ejecutiva", "Van Grande"]},
                 "service_time": {"type": "string", "description": "Hora de recogida que pidió el cliente. 'ahora' si es inmediato/sin hora; o 'hoy 6pm', 'mañana 8:30am', 'pasado mañana 14:00', '2026-06-20 09:00' si es para más tarde. El sistema decide si despacha ya o lo agenda."},
             },

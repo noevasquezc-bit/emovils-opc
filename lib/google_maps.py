@@ -2,6 +2,7 @@
 Emovils OPC — Google Maps API
 Cálculo de rutas, distancias y estimación de precios.
 """
+import re
 import requests
 import logging
 from config.settings import GOOGLE_MAPS_API_KEY
@@ -189,3 +190,107 @@ def get_directions_url(origin: str, destination: str) -> str:
     o = origin.replace(" ", "+")
     d = destination.replace(" ", "+")
     return f"https://www.google.com/maps/dir/{o}/{d}"
+
+
+def _decode_polyline(s: str):
+    """Decodifica una polyline codificada de Google a lista de (lat, lng).
+    Algoritmo estandar de Google Encoded Polyline Algorithm Format."""
+    if not s:
+        return []
+    puntos, index, lat, lng = [], 0, 0, 0
+    longitud = len(s)
+    while index < longitud:
+        for es_lng in (0, 1):
+            shift = result = 0
+            while True:
+                b = ord(s[index]) - 63
+                index += 1
+                result |= (b & 0x1f) << shift
+                shift += 5
+                if b < 0x20:
+                    break
+            d = ~(result >> 1) if (result & 1) else (result >> 1)
+            if es_lng:
+                lng += d
+            else:
+                lat += d
+        puntos.append((lat / 1e5, lng / 1e5))
+    return puntos
+
+
+def ruta_calles(o_lat, o_lng, d_lat, d_lng):
+    """Geometria de la ruta por CALLE entre dos puntos (lat,lng) via Google
+    Directions: lista [[lat,lng], ...] o [] si no hay clave / falla / la API no
+    esta habilitada. Es la MISMA fuente que geocodifica los puntos, asi la linea
+    de ruta coincide con las calles reales (OSRM publico daba rutas torcidas en RD)."""
+    if not GOOGLE_MAPS_API_KEY:
+        return []
+    url = f"{MAPS_BASE}/directions/json"
+    params = {
+        "origin": f"{o_lat},{o_lng}",
+        "destination": f"{d_lat},{d_lng}",
+        "mode": "driving",
+        "language": "es",
+        "region": "do",
+        "key": GOOGLE_MAPS_API_KEY,
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        logger.warning(f"ruta_calles error: {e}")
+        return []
+    if data.get("status") != "OK":
+        logger.warning("ruta_calles status=%s %s",
+                       data.get("status"), data.get("error_message", ""))
+        return []
+    rutas = data.get("routes", [])
+    if not rutas:
+        return []
+    encoded = rutas[0].get("overview_polyline", {}).get("points", "")
+    return [[round(la, 6), round(ln, 6)] for la, ln in _decode_polyline(encoded)]
+
+
+def reverse_geocode(lat, lng) -> str:
+    """Convierte coordenadas (lat, lng) en una dirección legible y CORTA.
+
+    Cuando el cliente comparte su ubicación por WhatsApp, llega como números
+    largos (18.44570541381836, -69.93488311767578). Eso es incómodo y Monserrat
+    no debería leerlo. Aquí lo volvemos algo como "Calle El Sol, Piantini".
+    Devuelve "" si no hay clave o Google no encuentra nada.
+    """
+    if not GOOGLE_MAPS_API_KEY:
+        return ""
+    url = f"{MAPS_BASE}/geocode/json"
+    params = {"latlng": f"{lat},{lng}", "key": GOOGLE_MAPS_API_KEY,
+              "language": "es", "region": "do"}
+    try:
+        resp = requests.get(url, params=params, timeout=15)
+        resp.raise_for_status()
+        results = resp.json().get("results", [])
+    except Exception as e:
+        logger.warning(f"reverse_geocode error: {e}")
+        return ""
+    if not results:
+        return ""
+    return _acortar_direccion(results[0].get("formatted_address", ""))
+
+
+def _acortar_direccion(formatted: str) -> str:
+    """Quita el país y el código postal, y deja a lo sumo 3 partes (calle, sector,
+    ciudad) para que la dirección sea corta y fácil de leer."""
+    if not formatted:
+        return ""
+    partes = [p.strip() for p in formatted.split(",") if p.strip()]
+    paises = {"república dominicana", "republica dominicana",
+              "dominican republic", "rep. dominicana", "rd"}
+    limpio = []
+    for p in partes:
+        if p.lower() in paises:
+            continue
+        # Quita códigos postales (4-6 dígitos sueltos al final de la parte).
+        p2 = re.sub(r"\s*\b\d{4,6}\b\s*$", "", p).strip()
+        if p2:
+            limpio.append(p2)
+    return ", ".join(limpio[:3])
