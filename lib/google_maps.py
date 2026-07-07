@@ -168,9 +168,13 @@ def buscar_lugar(texto: str) -> dict:
     nombre = r.get("name", "")
     direccion = r.get("formatted_address", "")
     # Guardia anti-resultado-lejano: el lugar debe estar en RD.
-    en_rd = ("dominican" in direccion.lower() or "dominicana" in direccion.lower())
+    # Se valida por COORDENADAS (caja geografica de RD), no por texto, porque
+    # con language=es la API suele omitir el pais en formatted_address
+    # (ej: 'Av. José Ortega y Gasset, Santo Domingo').
+    en_rd = (17.3 <= loc["lat"] <= 20.0) and (-72.1 <= loc["lng"] <= -68.2)
     if not en_rd:
-        logger.info(f"buscar_lugar '{texto}' resolvio fuera de RD: {direccion}")
+        logger.info(f"buscar_lugar '{texto}' resolvio fuera de RD: {direccion} "
+                    f"({loc['lat']},{loc['lng']})")
         return {}
     if nombre and nombre.lower() not in direccion.lower():
         formatted = f"{nombre}, {direccion}"

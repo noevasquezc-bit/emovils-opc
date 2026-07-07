@@ -57,6 +57,23 @@ class TestBuscarLugar:
         assert "Plaza de la Salud" in r["formatted"]
         assert "República Dominicana" in r["formatted"]
 
+    def test_acepta_direccion_sin_pais(self):
+        """La API real con language=es omite el país: debe aceptarse por coordenadas."""
+        sin_pais = {
+            "status": "OK",
+            "results": [{
+                "name": "Hospital General De La Plaza de la Salud",
+                "formatted_address": "Av. José Ortega y Gasset, Santo Domingo",
+                "geometry": {"location": {"lat": 18.4887904, "lng": -69.9219151}},
+                "types": ["hospital", "establishment"],
+            }],
+        }
+        with patch.object(gm, "GOOGLE_MAPS_API_KEY", "test-key"), \
+             patch.object(gm.requests, "get", return_value=_resp(sin_pais)):
+            r = gm.buscar_lugar("plaza de la salud")
+        assert r["lat"] == 18.4887904
+        assert "Plaza de la Salud" in r["formatted"]
+
     def test_rechaza_resultado_fuera_de_rd(self):
         fuera = {
             "status": "OK",
