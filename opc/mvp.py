@@ -345,8 +345,16 @@ def _medir_distancia_google(origen: str, destino: str) -> Optional[dict]:
             )
             return None
 
-        # 2) Medir distancia real
-        r = get_distance_matrix(o_norm, d_norm)
+        # 2) Medir distancia real con el PUNTO resuelto (lat,lng), no el texto.
+        #    Clave cuando el cliente da un nombre de lugar ("Megacentro") que se
+        #    resolvio via Places: Distance Matrix con el texto crudo podria
+        #    fallar o caer en otro sitio.
+        def _punto(g, texto_norm):
+            if g.get("lat") is not None and g.get("lng") is not None:
+                return f"{g['lat']},{g['lng']}"
+            return texto_norm
+
+        r = get_distance_matrix(_punto(go, o_norm), _punto(gd, d_norm))
         if "error" not in r and r.get("distance_km"):
             return {
                 "km": round(float(r["distance_km"]), 1),

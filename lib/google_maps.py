@@ -136,6 +136,50 @@ _TIPOS_VAGOS = {
 }
 
 
+def buscar_lugar(texto: str) -> dict:
+    """Busca un lugar por NOMBRE, como el buscador de Google Maps.
+
+    Resuelve puntos de referencia que el geocoding clásico no encuentra:
+    'Plaza de la Salud', 'Megacentro', 'Agora Mall', 'Caribe Tours', etc.
+    Usa Places Text Search sesgado a República Dominicana. Devuelve {} si
+    no encuentra nada o si el resultado cae fuera de RD."""
+    if not GOOGLE_MAPS_API_KEY or not (texto or "").strip():
+        return {}
+    url = f"{MAPS_BASE}/place/textsearch/json"
+    params = {"query": texto, "key": GOOGLE_MAPS_API_KEY,
+              "language": "es", "region": "do"}
+    try:
+        resp = requests.get(url, params=params, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        logger.warning(f"buscar_lugar error: {e}")
+        return {}
+    status = data.get("status", "")
+    if status != "OK":
+        if status != "ZERO_RESULTS":
+            # REQUEST_DENIED aqui = falta habilitar 'Places API' en Google Cloud
+            logger.warning(f"buscar_lugar status={status}: {data.get('error_message', '')}")
+        return {}
+    r = (data.get("results") or [{}])[0]
+    loc = r.get("geometry", {}).get("location", {})
+    if loc.get("lat") is None or loc.get("lng") is None:
+        return {}
+    nombre = r.get("name", "")
+    direccion = r.get("formatted_address", "")
+    # Guardia anti-resultado-lejano: el lugar debe estar en RD.
+    en_rd = ("dominican" in direccion.lower() or "dominicana" in direccion.lower())
+    if not en_rd:
+        logger.info(f"buscar_lugar '{texto}' resolvio fuera de RD: {direccion}")
+        return {}
+    if nombre and nombre.lower() not in direccion.lower():
+        formatted = f"{nombre}, {direccion}"
+    else:
+        formatted = direccion or nombre
+    return {"lat": loc["lat"], "lng": loc["lng"], "formatted": formatted,
+            "name": nombre, "types": r.get("types", [])}
+
+
 def geocode_detallado(address: str) -> dict:
     """Geocodifica una direccion devolviendo informacion de PRECISION.
 
@@ -158,6 +202,15 @@ def geocode_detallado(address: str) -> dict:
 
     results = data.get("results", [])
     if not results:
+        # Geocoding no encontro nada — puede ser un NOMBRE de lugar
+        # ("Plaza de la Salud"). Buscar como en el buscador de Google Maps.
+        lugar = buscar_lugar(address)
+        if lugar:
+            return {"ok": True, "preciso": True, "via_places": True,
+                    "partial_match": False, "solo_vago": False,
+                    "types": sorted(lugar.get("types", [])), "location_type": "PLACES",
+                    "formatted": lugar["formatted"],
+                    "lat": lugar["lat"], "lng": lugar["lng"]}
         return {"ok": False, "preciso": False, "motivo": "sin_resultados",
                 "status": data.get("status", "")}
 
@@ -171,6 +224,17 @@ def geocode_detallado(address: str) -> dict:
     # direcciones validas que resuelven a una calle concreta (route), y rechazarlas seria
     # un falso positivo. La senal confiable es que el resultado NO sea solo una zona amplia.
     solo_vago = types.issubset(_TIPOS_VAGOS) if types else True
+    if solo_vago:
+        # Google solo ubico pais/provincia — tipico cuando el texto es el NOMBRE
+        # de un lugar ("Caribe Tours", "Megacentro"). Intentar como busqueda de
+        # Google Maps antes de rendirse.
+        lugar = buscar_lugar(address)
+        if lugar:
+            return {"ok": True, "preciso": True, "via_places": True,
+                    "partial_match": partial, "solo_vago": False,
+                    "types": sorted(lugar.get("types", [])), "location_type": "PLACES",
+                    "formatted": lugar["formatted"],
+                    "lat": lugar["lat"], "lng": lugar["lng"]}
     preciso = not solo_vago
     return {
         "ok": True,
