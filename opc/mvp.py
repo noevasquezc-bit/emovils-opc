@@ -855,7 +855,12 @@ def asignar_conductor_y_vehiculo(booking_id: str, vehicle_type: str) -> dict:
 # Estado persistido en Bookings: offer_status, offered_driver_id,
 # offer_expires_at, offer_attempts, offer_log.
 
-OFERTA_TTL_SEG = 60          # segundos que tiene el chofer para responder (viaje YA)
+# Segundos que tienen los choferes para responder una carrera INMEDIATA.
+# 60s resultó irreal (nadie mira WhatsApp tan rápido): ahora 5 minutos.
+OFERTA_TTL_SEG = int(os.getenv("OFERTA_TTL_SEG", "300"))
+# Carrera INMEDIATA: se ofrece a los N choferes MAS CERCANOS A LA VEZ y el
+# primero que responda ACEPTO se la lleva (antes era 1 por vez y se perdían).
+OFERTA_CHOFERES_POR_RONDA = int(os.getenv("OFERTA_CHOFERES_POR_RONDA", "3"))
 # Por decision del negocio el chofer queda EN LINEA hasta desconectarse (panel
 # web) o entrar en carrera (busy); su ubicacion NO caduca por defecto. Este
 # valor solo aplica si se pasa max_edad_horas explicitamente a choferes_cercanos.
@@ -1364,6 +1369,23 @@ def _drivers_ya_ofertados(bf: dict) -> list[str]:
     return list(ids)
 
 
+def _ronda_actual(log: str) -> list[str]:
+    """Choferes de la ULTIMA ronda de ofertas (la linea 'oferta #N ...' mas reciente)."""
+    lineas = [l for l in (log or "").splitlines() if "oferta #" in l]
+    if not lineas:
+        return []
+    return re.findall(r"->\s*(DRV-\w+)", lineas[-1])
+
+
+def _ronda_completa_rechazada(log: str) -> bool:
+    """True si TODOS los choferes de la ronda vigente ya respondieron RECHAZO."""
+    ronda = _ronda_actual(log)
+    if not ronda:
+        return True
+    rechazaron = set(re.findall(r"RECHAZADA por (DRV-\w+)", log or ""))
+    return all(did in rechazaron for did in ronda)
+
+
 def _booking_pickup_dt(bf: dict) -> Optional[datetime]:
     """Hora de recogida programada de la reserva (Travel_Date como datetime UTC)."""
     return _parse_dt(bf.get("Travel_Date"))
@@ -1408,7 +1430,9 @@ def _msg_oferta(elegido: dict, bf: dict, pickup_dt: Optional[datetime] = None) -
         f"📏 A ~{elegido['dist_km']} km de tu ubicacion\n"
         f"💵 RD${bf.get('final_price',0)} ({bf.get('payment_method','')})\n\n"
         f"Responde *ACEPTO* para tomarla o *RECHAZO* para pasarla.\n"
-        f"Tienes {OFERTA_TTL_SEG} segundos."
+        + (f"Tienes {OFERTA_TTL_SEG // 60} minutos. " if OFERTA_TTL_SEG >= 120
+           else f"Tienes {OFERTA_TTL_SEG} segundos. ")
+        + "⚡ El primero que responda ACEPTO se la lleva."
     )
 
 
@@ -1485,27 +1509,37 @@ def _despachar_siguiente(booking_rec: dict) -> dict:
         })
         _avisar_sin_choferes(booking_rec)
         return {"ok": False, "razon": "sin choferes disponibles cerca", "offer_status": "no_drivers"}
-    elegido = candidatos[0]
     intentos = int(bf.get("offer_attempts", 0) or 0) + 1
-    # PROGRAMADO: el chofer tiene mas tiempo para aceptar (lo agenda con calma).
+    # PROGRAMADO: el chofer tiene mas tiempo para aceptar (lo agenda con calma)
+    # y se le ofrece a UNO por vez. INMEDIATO: se ofrece a los N mas cercanos A
+    # LA VEZ y el primero que responda ACEPTO se la lleva (broadcast).
     pickup_dt = _booking_pickup_dt(bf)
     es_prog = _es_programado(pickup_dt)
     ttl = OFERTA_TTL_PROGRAMADA_SEG if es_prog else OFERTA_TTL_SEG
+    n_ronda = 1 if es_prog else max(1, OFERTA_CHOFERES_POR_RONDA)
+    ronda = candidatos[:n_ronda]
+    elegido = ronda[0]  # el mas cercano queda como "principal" (compatibilidad)
     expira = _now_utc() + timedelta(seconds=ttl)
     etiqueta = f"PROGRAMADA {_fmt_dt_rd(pickup_dt)}" if es_prog else "inmediata"
+    # Cada chofer ofertado queda en el log con '-> DRV-x' para que la proxima
+    # ronda los excluya (_drivers_ya_ofertados) y para avisarles si otro gana.
+    linea = f"oferta #{intentos} ({etiqueta}) " + " | ".join(
+        f"-> {c['driver_id']} ({c['dist_km']} km)" for c in ronda)
     _at_update("Bookings", booking_rec["id"], {
         "offer_status": "offered",
         "offered_driver_id": elegido["driver_id"],
         "offer_expires_at": expira.isoformat(),
         "offer_attempts": intentos,
-        "offer_log": _log_append(bf, f"oferta #{intentos} ({etiqueta}) -> {elegido['driver_id']} ({elegido['dist_km']} km)"),
+        "offer_log": _log_append(bf, linea),
     })
-    _enviar_oferta_whatsapp(elegido, bf, pickup_dt)
+    for c in ronda:
+        _enviar_oferta_whatsapp(c, bf, pickup_dt)
     return {
         "ok": True, "offer_status": "offered", "intento": intentos,
         "programado": es_prog,
         "driver_id": elegido["driver_id"], "driver_name": elegido["driver_name"],
         "dist_km": elegido["dist_km"], "expira_en_seg": ttl,
+        "ofertados": [c["driver_id"] for c in ronda],
         "candidatos": [{"driver_id": c["driver_id"], "dist_km": c["dist_km"]} for c in candidatos],
     }
 
@@ -1557,6 +1591,21 @@ def _aceptar_oferta(booking: dict, driver: dict) -> dict:
     # INMEDIATO: queda 'busy' (va en camino ya).
     if not es_prog:
         _at_update("Drivers", driver["id"], {"driver_status": "busy"})
+
+    # Broadcast: avisar a los DEMAS choferes de la ronda que ya fue tomada,
+    # para que no queden esperando ni respondan a un viaje que ya no existe.
+    try:
+        from opc.whatsapp_green_api import notificar_chofer as _wa_aviso
+        for otro in _ronda_actual(bf.get("offer_log", "")):
+            if otro == did:
+                continue
+            od = _at_get("Drivers", formula=f"{{driver_id}}='{_af(otro)}'", max_records=1)
+            tel = od[0]["fields"].get("driver_phone", "") if od else ""
+            if tel:
+                _wa_aviso(tel, "⛔ La carrera ya fue tomada por otro chofer. "
+                               "¡Gracias por responder! Te avisamos en la próxima. 🚖")
+    except Exception as _e:
+        logger.warning("Aviso 'ya tomada' fallo: %s", _e)
 
     try:
         from opc.whatsapp_green_api import enviar_a_cliente as _wa_cli, notificar_chofer as _wa_drv
@@ -1741,20 +1790,35 @@ def responder_oferta(driver_phone: str, texto: str) -> dict:
     if acepta and not rechaza and estado_drv in ("offline", "suspended"):
         return {"ok": False, "es_chofer": True, "razon": "chofer_desconectado"}
 
-    # 1) Oferta EN VUELO (offer_status='offered'): la via normal.
-    bks = _at_get("Bookings",
-                  formula=f"AND({{offered_driver_id}}='{_af(did)}', {{offer_status}}='offered')",
-                  max_records=1)
+    # 1) Oferta EN VUELO (offer_status='offered'): la via normal. Con el
+    # broadcast la oferta puede estar en manos de VARIOS choferes a la vez:
+    # cuenta cualquiera que figure en el offer_log de esta reserva (aunque su
+    # ronda ya venciera — si la carrera sigue libre, el que responde se la lleva).
+    token = f"-> {_af(did)} "
+    bks = _at_get(
+        "Bookings",
+        formula=(f"AND({{offer_status}}='offered', "
+                 f"OR({{offered_driver_id}}='{_af(did)}', "
+                 f"FIND('{token}', {{offer_log}})))"),
+        max_records=1)
     if bks:
         booking = bks[0]
         bf = booking["fields"]
-        te = _parse_dt(bf.get("offer_expires_at"))
-        if te and _now_utc() > te:
-            return {"ok": False, "es_chofer": True, "razon": "oferta_vencida"}
         if acepta and not rechaza:
+            # Guardia anti-carrera: si otro chofer gano hace un instante, la
+            # reserva ya tendria driver_id — no pisarlo.
+            if (bf.get("driver_id") or "").strip():
+                return {"ok": False, "es_chofer": True, "razon": "ya_tomada"}
             return _aceptar_oferta(booking, d)
         if rechaza:
-            return _rechazar_oferta(booking, did)
+            # En broadcast, el RECHAZO de uno NO mata la ronda de los demas.
+            # Solo cuando TODOS los de la ronda vigente rechazaron se pasa de
+            # inmediato a la siguiente ronda (sin esperar a que venza el TTL).
+            log_nuevo = _log_append(bf, f"RECHAZADA por {did}")
+            if _ronda_completa_rechazada(log_nuevo):
+                return _rechazar_oferta(booking, did)
+            _at_update("Bookings", booking["id"], {"offer_log": log_nuevo})
+            return {"ok": True, "es_chofer": True, "accion": "rechazada"}
         return {"ok": False, "es_chofer": True, "razon": "respuesta_no_entendida"}
 
     # 2) Sin oferta en vuelo: ¿declina un servicio AGENDADO que ya aceptó?
