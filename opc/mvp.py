@@ -861,6 +861,10 @@ OFERTA_TTL_SEG = int(os.getenv("OFERTA_TTL_SEG", "300"))
 # Carrera INMEDIATA: se ofrece a los N choferes MAS CERCANOS A LA VEZ y el
 # primero que responda ACEPTO se la lleva (antes era 1 por vez y se perdían).
 OFERTA_CHOFERES_POR_RONDA = int(os.getenv("OFERTA_CHOFERES_POR_RONDA", "3"))
+# Solo se le ofrece una carrera INMEDIATA a choferes que esten a lo sumo a
+# estos minutos del punto de recogida (ETA estimada). Evita ofrecerle un viaje
+# a un chofer a 38 km que nunca va a llegar a tiempo. Ajustable por env.
+OFERTA_MAX_ETA_MIN = int(os.getenv("OFERTA_MAX_ETA_MIN", "5"))
 # Por decision del negocio el chofer queda EN LINEA hasta desconectarse (panel
 # web) o entrar en carrera (busy); su ubicacion NO caduca por defecto. Este
 # valor solo aplica si se pasa max_edad_horas explicitamente a choferes_cercanos.
@@ -1422,12 +1426,13 @@ def _msg_oferta(elegido: dict, bf: dict, pickup_dt: Optional[datetime] = None) -
             "Responde *ACEPTO* para agendarlo o *RECHAZO* para pasarlo.\n"
             f"Tienes {mins} minutos para responder."
         )
+    eta_txt = f" (~{elegido['eta_min']} min)" if elegido.get("eta_min") else ""
     return (
         "🚖 *Nueva carrera Emovils*\n\n"
         f"📍 Recogida: {bf.get('Pickup_Location','')}\n"
         f"🎯 Destino: {bf.get('Dropoff_Location','')}\n"
         f"👥 Pasajeros: {bf.get('Passengers','')}\n"
-        f"📏 A ~{elegido['dist_km']} km de tu ubicacion\n"
+        f"📏 A ~{elegido['dist_km']} km{eta_txt} de tu ubicacion\n"
         f"💵 RD${bf.get('final_price',0)} ({bf.get('payment_method','')})\n\n"
         f"Responde *ACEPTO* para tomarla o *RECHAZO* para pasarla.\n"
         + (f"Tienes {OFERTA_TTL_SEG // 60} minutos. " if OFERTA_TTL_SEG >= 120
@@ -1445,7 +1450,7 @@ def _enviar_oferta_whatsapp(elegido: dict, bf: dict, pickup_dt: Optional[datetim
                        elegido.get("driver_id"), e)
 
 
-def _avisar_sin_choferes(booking_rec: dict) -> None:
+def _avisar_sin_choferes(booking_rec: dict, razon: str = "") -> None:
     """No hay choferes disponibles para la reserva. En vez de INVENTAR o dejar
     un chofer 'fantasma' pegado, se le dice la VERDAD al cliente y se escala a un
     supervisor humano para que lo contacte y resuelva."""
@@ -1475,7 +1480,8 @@ def _avisar_sin_choferes(booking_rec: dict) -> None:
                 f"👥 {bf.get('Passengers','')}  ·  💵 RD${bf.get('final_price',0)} "
                 f"({bf.get('payment_method','')})\n"
                 f"⏰ {bf.get('service_time','')}\n\n"
-                "Nadie aceptó la oferta. Llamar al cliente para coordinar."
+                + (f"Motivo: {razon}.\n" if razon else "")
+                + "Nadie quedó asignado. Llamar al cliente para coordinar."
             )
     except Exception as e:
         logger.warning("Aviso 'sin choferes' falló para %s: %s", booking_id, e)
@@ -1495,10 +1501,26 @@ def _despachar_siguiente(booking_rec: dict) -> dict:
     lat, lng = coords
     excluir = _drivers_ya_ofertados(bf)
     candidatos = choferes_cercanos(lat, lng, excluir=excluir)
+    # ETA estimada de cada candidato al punto de recogida (sin llamar a Google).
+    for c in candidatos:
+        c["eta_min"] = _eta_minutos(c["dist_km"] * 1000)
+    # PROGRAMADO: el chofer tiene mas tiempo para aceptar (lo agenda con calma)
+    # y se le ofrece a UNO por vez. INMEDIATO: se ofrece a los N mas cercanos A
+    # LA VEZ y el primero que responda ACEPTO se la lleva (broadcast).
+    pickup_dt = _booking_pickup_dt(bf)
+    es_prog = _es_programado(pickup_dt)
+    # Carrera INMEDIATA: solo choferes a <= OFERTA_MAX_ETA_MIN minutos del
+    # pickup. Un chofer a 38 km no puede llegar "ya" — no se le ofrece.
+    # (Los PROGRAMADOS no se filtran: el chofer tiene horas para llegar.)
+    if not es_prog:
+        candidatos = [c for c in candidatos if c["eta_min"] <= OFERTA_MAX_ETA_MIN]
     if not candidatos:
+        razon = "sin choferes disponibles cerca"
+        if not es_prog:
+            razon = (f"sin choferes a <={OFERTA_MAX_ETA_MIN} min del pickup")
         _at_update("Bookings", booking_rec["id"], {
             "offer_status": "no_drivers",
-            "offer_log": _log_append(bf, "sin choferes disponibles cerca"),
+            "offer_log": _log_append(bf, razon),
             # Honestidad: no dejar pegado un chofer "fantasma" de un intento previo.
             "offered_driver_id": "",
             "driver_id": "",
@@ -1507,14 +1529,9 @@ def _despachar_siguiente(booking_rec: dict) -> dict:
             "Driver_Vehicle": "",
             "vehicle_id": "",
         })
-        _avisar_sin_choferes(booking_rec)
-        return {"ok": False, "razon": "sin choferes disponibles cerca", "offer_status": "no_drivers"}
+        _avisar_sin_choferes(booking_rec, razon)
+        return {"ok": False, "razon": razon, "offer_status": "no_drivers"}
     intentos = int(bf.get("offer_attempts", 0) or 0) + 1
-    # PROGRAMADO: el chofer tiene mas tiempo para aceptar (lo agenda con calma)
-    # y se le ofrece a UNO por vez. INMEDIATO: se ofrece a los N mas cercanos A
-    # LA VEZ y el primero que responda ACEPTO se la lleva (broadcast).
-    pickup_dt = _booking_pickup_dt(bf)
-    es_prog = _es_programado(pickup_dt)
     ttl = OFERTA_TTL_PROGRAMADA_SEG if es_prog else OFERTA_TTL_SEG
     n_ronda = 1 if es_prog else max(1, OFERTA_CHOFERES_POR_RONDA)
     ronda = candidatos[:n_ronda]

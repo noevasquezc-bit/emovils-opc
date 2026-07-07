@@ -34,11 +34,12 @@ def _booking(fields=None):
     return {"id": "recBK1", "fields": base}
 
 
-def _candidatos(n=4):
+def _candidatos(n=4, dists=(0.5, 1.0, 1.5, 20.0)):
+    """Por defecto 3 choferes cerca (<=5 min) y 1 lejos (20 km)."""
     return [
         {"driver_id": f"DRV-{i}", "driver_name": f"Chofer {i}",
          "driver_phone": f"+1809555000{i}", "assigned_vehicle_id": "",
-         "record_id": f"recD{i}", "dist_km": float(i), "loc_age_min": 1.0}
+         "record_id": f"recD{i}", "dist_km": float(dists[i - 1]), "loc_age_min": 1.0}
         for i in range(1, n + 1)
     ]
 
@@ -70,11 +71,56 @@ class TestDespachoBroadcast:
                           side_effect=lambda c, bf, dt=None: enviados.append(c["driver_id"])):
             r = mvp._despachar_siguiente(_booking())
         assert r["ok"]
-        assert enviados == ["DRV-1", "DRV-2", "DRV-3"]  # ronda de 3, el 4to espera
+        assert enviados == ["DRV-1", "DRV-2", "DRV-3"]  # ronda de 3; DRV-4 está a 20 km
         assert r["driver_id"] == "DRV-1"                # el más cercano es el principal
         # todos los ofertados quedan en el log para exclusión y avisos
         assert all(f"-> DRV-{i}" in updates["offer_log"] for i in (1, 2, 3))
         assert "-> DRV-4" not in updates["offer_log"]
+
+    def test_no_se_oferta_a_chofer_lejos(self):
+        """Caso Lewis (38 km): un chofer a más de 5 min NO recibe la oferta."""
+        enviados = []
+        with patch.object(mvp, "_geocode_pickup", return_value=(18.45, -69.95)), \
+             patch.object(mvp, "choferes_cercanos",
+                          return_value=_candidatos(2, dists=(1.0, 38.0))), \
+             patch.object(mvp, "_at_update"), \
+             patch.object(mvp, "_enviar_oferta_whatsapp",
+                          side_effect=lambda c, bf, dt=None: enviados.append(c["driver_id"])):
+            r = mvp._despachar_siguiente(_booking())
+        assert r["ok"] and enviados == ["DRV-1"]
+
+    def test_todos_lejos_escala_a_supervisor(self):
+        """Si nadie está a <=5 min, NO se oferta: se escala al supervisor."""
+        with patch.object(mvp, "_geocode_pickup", return_value=(18.45, -69.95)), \
+             patch.object(mvp, "choferes_cercanos",
+                          return_value=_candidatos(2, dists=(15.0, 38.0))), \
+             patch.object(mvp, "_at_update"), \
+             patch.object(mvp, "_enviar_oferta_whatsapp") as env, \
+             patch.object(mvp, "_avisar_sin_choferes") as aviso:
+            r = mvp._despachar_siguiente(_booking())
+        assert not r["ok"] and r["offer_status"] == "no_drivers"
+        env.assert_not_called()
+        aviso.assert_called_once()
+
+    def test_programado_no_filtra_por_radio(self):
+        """Un viaje PROGRAMADO puede aceptarlo un chofer lejos (tiene horas)."""
+        from datetime import timedelta
+        enviados = []
+        futuro = (mvp._now_utc() + timedelta(hours=5)).isoformat()
+        with patch.object(mvp, "_geocode_pickup", return_value=(18.45, -69.95)), \
+             patch.object(mvp, "choferes_cercanos",
+                          return_value=_candidatos(2, dists=(15.0, 38.0))), \
+             patch.object(mvp, "_at_update"), \
+             patch.object(mvp, "_enviar_oferta_whatsapp",
+                          side_effect=lambda c, bf, dt=None: enviados.append(c["driver_id"])):
+            r = mvp._despachar_siguiente(_booking({"Travel_Date": futuro}))
+        assert r["ok"] and enviados == ["DRV-1"]
+
+    def test_oferta_incluye_minutos_de_llegada(self):
+        c = _candidatos(1)[0]
+        c["eta_min"] = mvp._eta_minutos(c["dist_km"] * 1000)
+        msg = mvp._msg_oferta(c, _booking()["fields"])
+        assert f"~{c['eta_min']} min" in msg
 
     def test_ttl_ya_no_es_60_segundos(self):
         """60s era irreal: el TTL inmediato debe ser >= 5 minutos."""
