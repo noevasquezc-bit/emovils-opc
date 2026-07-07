@@ -240,6 +240,43 @@ class TestResponderOferta:
             r = mvp.oferta_vigente_chofer("", phone="+18095550002")
         assert r["ok"] and r["oferta"]["dist_km"] == 5.0
 
+    def test_iniciar_dos_veces_no_mata_la_oferta_viva(self):
+        """Doble disparo de iniciar_despacho con oferta vigente: NO re-despacha.
+
+        Caso real 07/07/2026: un segundo iniciar_despacho excluyó al chofer ya
+        ofertado y anuló la oferta viva con 'no_drivers'.
+        """
+        from datetime import timedelta
+        log = "x oferta #1 (inmediata) -> DRV-1 (0.02 km)"
+        vence = (mvp._now_utc() + timedelta(seconds=200)).isoformat()
+        bk = _booking({"offer_status": "offered", "offered_driver_id": "DRV-1",
+                       "offer_log": log, "offer_expires_at": vence, "driver_id": ""})
+        with patch.object(mvp, "_at_get", return_value=[bk]), \
+             patch.object(mvp, "_despachar_siguiente") as desp:
+            r = mvp.iniciar_despacho("EMV-TEST-0001")
+        desp.assert_not_called()
+        assert r["ok"] and r.get("ya_en_curso")
+
+    def test_iniciar_con_oferta_vencida_si_re_despacha(self):
+        """Si la oferta ya venció, iniciar_despacho sí puede relanzar la búsqueda."""
+        from datetime import timedelta
+        vencida = (mvp._now_utc() - timedelta(seconds=30)).isoformat()
+        bk = _booking({"offer_status": "offered", "offered_driver_id": "DRV-1",
+                       "offer_expires_at": vencida, "driver_id": ""})
+        with patch.object(mvp, "_at_get", return_value=[bk]), \
+             patch.object(mvp, "_despachar_siguiente", return_value={"ok": True}) as desp:
+            r = mvp.iniciar_despacho("EMV-TEST-0001")
+        desp.assert_called_once()
+        assert r["ok"]
+
+    def test_iniciar_con_carrera_asignada_no_re_despacha(self):
+        bk = _booking({"offer_status": "accepted", "driver_id": "DRV-1"})
+        with patch.object(mvp, "_at_get", return_value=[bk]), \
+             patch.object(mvp, "_despachar_siguiente") as desp:
+            r = mvp.iniciar_despacho("EMV-TEST-0001")
+        desp.assert_not_called()
+        assert r["ok"] and r.get("ya_en_curso")
+
     def test_respuesta_tardia_toma_la_carrera_si_sigue_libre(self):
         """La oferta técnicamente venció pero sigue 'offered' y sin chofer: se acepta."""
         from datetime import timedelta

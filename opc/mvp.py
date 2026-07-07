@@ -1617,6 +1617,16 @@ def iniciar_despacho(booking_id: str) -> dict:
     bk = _at_get("Bookings", formula=f"{{Booking_ID}}='{_af(booking_id)}'", max_records=1)
     if not bk:
         return {"ok": False, "razon": "booking no existe"}
+    bf = bk[0].get("fields", {})
+    # Guardia anti doble disparo: si ya hay una oferta viva (no vencida),
+    # NO re-despachamos — un segundo despacho excluiria a los ya ofertados
+    # y mataria la oferta en curso con "no_drivers".
+    if bf.get("offer_status") == "offered":
+        exp = _parse_dt(bf.get("offer_expires_at"))
+        if exp and exp > _now_utc():
+            return {"ok": True, "ya_en_curso": True, "razon": "oferta vigente en curso"}
+    if bf.get("driver_id"):
+        return {"ok": True, "ya_en_curso": True, "razon": "carrera ya asignada"}
     return _despachar_siguiente(bk[0])
 
 
