@@ -2049,7 +2049,11 @@ def revisar_recordatorios_agendados() -> dict:
     Pensado para llamarse periodicamente (cada pocos minutos)."""
     ahora = _now_utc()
     limite = ahora + timedelta(minutes=RECORDATORIO_ANTES_MIN)
-    bks = _at_get("Bookings", formula="{offer_status}='accepted'", max_records=100)
+    bks = _at_get(
+        "Bookings",
+        formula=("AND({offer_status}='accepted',"
+                 "{booking_status}!='completed',{booking_status}!='cancelled')"),
+        max_records=100)
     enviados = []
     for b in bks:
         bf = b["fields"]
@@ -2197,7 +2201,10 @@ def estado_flota() -> dict:
     try:
         activos = _at_get(
             "Bookings",
-            formula="OR({offer_status}='accepted',{booking_status}='in_progress')",
+            # Solo viajes realmente activos: una reserva completada o cancelada
+            # puede quedar con offer_status='accepted' viejo y NO es un viaje.
+            formula=("AND(OR({offer_status}='accepted',{booking_status}='in_progress'),"
+                     "{booking_status}!='completed',{booking_status}!='cancelled')"),
             max_records=100)
         for b in activos:
             bf = b["fields"]
