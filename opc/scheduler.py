@@ -448,6 +448,24 @@ def job_cpa_safeguard() -> dict:
         return {"ok": False, "error": str(exc)[:300]}
 
 
+def job_leads_diario() -> dict:
+    """
+    Caza leads B2B: busca empresas RD, manda email de outreach y follow-ups
+    hasta cumplir la meta diaria (LEADS_META_DIARIA, default 5). Corre cada
+    2 horas en horario laboral; si la meta ya se cumplió solo hace follow-ups.
+    """
+    try:
+        from opc.agente_leads_diario import ejecutar_ciclo_leads
+        r = ejecutar_ciclo_leads()
+        logger.info("✅ Job leads_diario: %s nuevo(s), hoy=%s/%s modo=%s",
+                    len(r.get("nuevos", [])), r.get("contactados_total_hoy", "?"),
+                    r.get("meta_diaria", "?"), r.get("modo", "?"))
+        return r
+    except Exception as exc:
+        logger.error("❌ Job leads_diario falló: %s", exc)
+        return {"ok": False, "error": str(exc)[:300]}
+
+
 # ─────────────────────────────────────────────────────────────
 # REGISTRO DE JOBS + ARRANQUE DEL SCHEDULER
 # ─────────────────────────────────────────────────────────────
@@ -484,6 +502,11 @@ JOBS: dict[str, dict] = {
         "func": job_cpa_safeguard,
         "descripcion": "Evalúa CPA ($6 inviolable); pausa Meta Ads si toca",
         "horario": "Cada 6 horas",
+    },
+    "leads_diario": {
+        "func": job_leads_diario,
+        "descripcion": "Caza 5 leads B2B/día: busca empresas, email outreach y follow-ups",
+        "horario": "Cada 2 horas de 8:10 a 18:10 (RD)",
     },
 }
 
@@ -565,6 +588,10 @@ def iniciar_scheduler():
                           id="plan_social_semanal", name=JOBS["plan_social_semanal"]["descripcion"])
             sched.add_job(job_cpa_safeguard, IntervalTrigger(hours=6, timezone=TZ_RD),
                           id="cpa_safeguard", name=JOBS["cpa_safeguard"]["descripcion"])
+            # Leads B2B: cada 2 horas en horario laboral RD (8:10, 10:10 ... 18:10).
+            sched.add_job(job_leads_diario,
+                          CronTrigger(hour="8-18/2", minute=10, timezone=TZ_RD),
+                          id="leads_diario", name=JOBS["leads_diario"]["descripcion"])
             # Despacho: revisar ofertas vencidas cada 15s y reasignar al siguiente.
             sched.add_job(job_despacho_tick, IntervalTrigger(seconds=15, timezone=TZ_RD),
                           id="despacho_tick", name="Reasignar ofertas de carrera vencidas")

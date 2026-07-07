@@ -13,6 +13,7 @@ Endpoints nuevos para el sistema OPC:
   /api/v2/social/planificar — Plan semanal de contenido (7 posts)
   /api/v2/social/publicar   — Publica post aprobado (Meta Graph API)
   /api/v2/prospeccion/buscar — Pipeline de prospección B2B
+  /api/v2/leads/ciclo       — Ciclo del agente de leads diario (5/día)
   /api/v2/ncf/emitir        — Emite factura NCF (DGII)
   /api/v2/scheduler/status  — Jobs programados + próximas ejecuciones
   /api/v2/scheduler/run/<id> — Dispara un job manualmente (pruebas)
@@ -1134,6 +1135,38 @@ def prospeccion_buscar():
         return jsonify(resultado)
     except Exception as e:
         logger.error(f"Error /prospeccion/buscar: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/v2/leads/ciclo", methods=["POST"])
+def leads_ciclo():
+    """
+    Corre UN ciclo del agente de leads diario: busca empresas RD (Apify o
+    mock), manda email de outreach hasta cumplir la meta del día, hace
+    follow-ups a los contactados hace ≥3 días y avisa al dueño por WhatsApp.
+
+    El scheduler corre esto solo cada 2h (8:10–18:10 RD); este endpoint es
+    para dispararlo a mano o probar.
+
+    Body JSON (todo opcional):
+      { "meta": 5, "max_busquedas": 3,
+        "enviar_correos": true, "avisar_owner": true }
+    """
+    # Solo el dueño: manda correos reales y consume crédito de Apify.
+    if not _token_admin_ok():
+        return _resp_no_autorizado()
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        from opc.agente_leads_diario import ejecutar_ciclo_leads
+        resultado = ejecutar_ciclo_leads(
+            meta=int(data["meta"]) if data.get("meta") is not None else None,
+            max_busquedas=int(data.get("max_busquedas", 3)),
+            enviar_correos=bool(data.get("enviar_correos", True)),
+            avisar_owner=bool(data.get("avisar_owner", True)),
+        )
+        return jsonify(resultado)
+    except Exception as e:
+        logger.error(f"Error /leads/ciclo: {e}")
         return jsonify({"error": str(e)}), 500
 
 

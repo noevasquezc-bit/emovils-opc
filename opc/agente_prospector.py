@@ -381,9 +381,12 @@ def _prospecto_desde_apify(item: dict, fuente: str) -> Prospect:
     """Mapea un item del dataset Apify Google Maps → Prospect."""
     nombre = item.get("title") or item.get("name") or "Desconocido"
     tipo = _inferir_tipo_empresa(nombre, item.get("categoryName", ""))
+    emails = item.get("emails") or []
+    email = (emails[0] if emails else "").replace("mailto:", "").strip().lower()
     return Prospect(
         nombre_empresa=nombre,
         tipo_empresa=tipo,
+        email=email,
         razon_potencial=f"Encontrado por scraping ({fuente}) · categoría: "
                         f"{item.get('categoryName', 'N/D')}",
         whatsapp=item.get("phone", "") or item.get("phoneUnformatted", ""),
@@ -424,6 +427,9 @@ def buscar_prospectos(
                 "searchStringsArray": [busqueda],
                 "maxCrawledPlacesPerSearch": max_resultados,
                 "language": "es",
+                # Extrae emails/redes del sitio web de cada negocio (evita
+                # adivinar direcciones y mandar correos que rebotan).
+                "scrapeContactDetails": True,
             }
             r = requests.post(url, json=payload, timeout=300)
             if not r.ok:
