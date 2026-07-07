@@ -1390,6 +1390,57 @@ def _ronda_completa_rechazada(log: str) -> bool:
     return all(did in rechazaron for did in ronda)
 
 
+def oferta_vigente_chofer(driver_id: str = "", phone: str = "") -> dict:
+    """Oferta EN VUELO para un chofer (para la app oficial de Emovils Chofer).
+
+    Busca una reserva 'offered' donde el chofer figure como principal o dentro
+    de la ronda (offer_log). Si la carrera ya tiene chofer asignado, para la
+    app es como si no hubiera oferta. Devuelve {"ok": True, "oferta": {...}|None}.
+    """
+    did = (driver_id or "").strip()
+    if not did and phone:
+        drivers = _buscar_driver_por_tel(phone)
+        did = drivers[0]["fields"].get("driver_id", "") if drivers else ""
+    if not did:
+        return {"ok": True, "oferta": None}
+
+    token = f"-> {_af(did)} "
+    bks = _at_get(
+        "Bookings",
+        formula=(f"AND({{offer_status}}='offered', "
+                 f"OR({{offered_driver_id}}='{_af(did)}', "
+                 f"FIND('{token}', {{offer_log}})))"),
+        max_records=1)
+    if not bks:
+        return {"ok": True, "oferta": None}
+    bf = bks[0]["fields"]
+    if (bf.get("driver_id") or "").strip():
+        return {"ok": True, "oferta": None}  # ya la tomo otro chofer
+
+    # Distancia de ESTE chofer segun quedo anotada en el log de la ronda.
+    m = re.search(rf"->\s*{re.escape(did)}\s*\(([\d.]+)\s*km\)",
+                  bf.get("offer_log") or "")
+    dist_km = float(m.group(1)) if m else None
+    eta_min = _eta_minutos(dist_km * 1000) if dist_km is not None else None
+
+    exp = _parse_dt(bf.get("offer_expires_at"))
+    expira_seg = max(0, int((exp - _now_utc()).total_seconds())) if exp else None
+
+    return {"ok": True, "oferta": {
+        "booking_id": bf.get("Booking_ID", ""),
+        "pickup": bf.get("Pickup_Location", ""),
+        "dropoff": bf.get("Dropoff_Location", ""),
+        "pasajeros": bf.get("Passengers"),
+        "precio_rd": bf.get("final_price"),
+        "pago": bf.get("payment_method", ""),
+        "dist_km": dist_km,
+        "eta_min": eta_min,
+        "programado": _booking_es_programado(bf),
+        "fecha": bf.get("Travel_Date") or "",
+        "expira_en_seg": expira_seg,
+    }}
+
+
 def _booking_pickup_dt(bf: dict) -> Optional[datetime]:
     """Hora de recogida programada de la reserva (Travel_Date como datetime UTC)."""
     return _parse_dt(bf.get("Travel_Date"))

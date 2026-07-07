@@ -201,6 +201,45 @@ class TestResponderOferta:
             mvp.responder_oferta("+18095550002", "RECHAZO")
         reo.assert_called_once()
 
+    def test_oferta_vigente_chofer_devuelve_datos_para_la_app(self):
+        """La app consulta GET /driver/oferta: datos de la carrera + expira_en."""
+        from datetime import timedelta
+        log = "x oferta #1 (inmediata) -> DRV-1 (2.0 km) | -> DRV-2 (5.0 km)"
+        vence = (mvp._now_utc() + timedelta(seconds=120)).isoformat()
+        bk = _booking({"offer_status": "offered", "offered_driver_id": "DRV-1",
+                       "offer_log": log, "offer_expires_at": vence, "driver_id": ""})
+        with patch.object(mvp, "_at_get", return_value=[bk]):
+            r = mvp.oferta_vigente_chofer("DRV-2")
+        o = r["oferta"]
+        assert r["ok"] and o
+        assert o["booking_id"] == "EMV-TEST-0001"
+        assert o["pickup"] and o["dropoff"]
+        assert o["dist_km"] == 5.0 and o["eta_min"] == mvp._eta_minutos(5000)
+        assert 0 < o["expira_en_seg"] <= 120
+
+    def test_oferta_vigente_sin_oferta_devuelve_none(self):
+        with patch.object(mvp, "_at_get", return_value=[]):
+            r = mvp.oferta_vigente_chofer("DRV-9")
+        assert r["ok"] and r["oferta"] is None
+
+    def test_oferta_vigente_ya_tomada_devuelve_none(self):
+        """Si la carrera ya tiene chofer, la app no debe mostrarla."""
+        log = "x oferta #1 (inmediata) -> DRV-1 (2.0 km) | -> DRV-2 (5.0 km)"
+        bk = _booking({"offer_status": "offered", "offered_driver_id": "DRV-1",
+                       "offer_log": log, "driver_id": "DRV-1"})
+        with patch.object(mvp, "_at_get", return_value=[bk]):
+            r = mvp.oferta_vigente_chofer("DRV-2")
+        assert r["ok"] and r["oferta"] is None
+
+    def test_oferta_vigente_resuelve_por_telefono(self):
+        log = "x oferta #1 (inmediata) -> DRV-2 (5.0 km)"
+        bk = _booking({"offer_status": "offered", "offered_driver_id": "DRV-2",
+                       "offer_log": log, "driver_id": ""})
+        with patch.object(mvp, "_buscar_driver_por_tel", return_value=[self._driver(2)]), \
+             patch.object(mvp, "_at_get", return_value=[bk]):
+            r = mvp.oferta_vigente_chofer("", phone="+18095550002")
+        assert r["ok"] and r["oferta"]["dist_km"] == 5.0
+
     def test_respuesta_tardia_toma_la_carrera_si_sigue_libre(self):
         """La oferta técnicamente venció pero sigue 'offered' y sin chofer: se acepta."""
         from datetime import timedelta

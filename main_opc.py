@@ -1515,12 +1515,27 @@ def api_driver_gps():
     return jsonify(res), (200 if res.get("ok") else 404)
 
 
+@app.route("/api/v2/driver/oferta", methods=["GET"])
+def api_driver_oferta():
+    """La app del chofer consulta si tiene una carrera ofertada en este momento.
+    ?driver_id=DRV-XX (o ?phone=...). Devuelve {"ok": true, "oferta": {...}|null}.
+    Autorizado: admin, chofer con enlace firmado, o sesión de equipo (app)."""
+    did = request.args.get("driver_id", "")
+    token = request.args.get("t", "")
+    if not (_token_admin_ok() or mvp_core.validar_token_driver(did, token)
+            or _sesion_equipo_ok()):
+        return _resp_no_autorizado()
+    res = mvp_core.oferta_vigente_chofer(did, request.args.get("phone", ""))
+    return jsonify(res), 200
+
+
 @app.route("/api/v2/driver/responder", methods=["POST"])
 def api_driver_responder():
-    """Simula/recibe la respuesta del chofer a una oferta. {phone, texto}.
-    Endpoint de pruebas: en producción la respuesta real llega por el webhook
-    de WhatsApp. Por eso aquí exigimos llave de admin."""
-    if not _token_admin_ok():
+    """Respuesta del chofer a una oferta: {phone, texto: 'ACEPTO'|'RECHAZO'}.
+    La usa la app oficial del chofer (botones Aceptar/Rechazar) con su sesión
+    Bearer; también sirve para pruebas con la llave de admin. En WhatsApp la
+    respuesta real sigue llegando por el webhook."""
+    if not (_token_admin_ok() or _sesion_equipo_ok()):
         return _resp_no_autorizado()
     d = request.get_json(force=True, silent=True) or {}
     res = mvp_core.responder_oferta(d.get("phone", ""), d.get("texto", ""))
