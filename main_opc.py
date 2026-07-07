@@ -2658,7 +2658,13 @@ async function finalizar(){{
     const r=await fetch('/api/v2/dispatch/{bid}/completar',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{token:'{token}'}})}});
     const j=await r.json();
     const m=document.getElementById('msg');
-    if(j.ok){{ m.style.color='#4ade80'; m.textContent='✅ Viaje finalizado. Quedas disponible.'; b.style.display='none';
+    if(j.ok){{
+      // La hoja entera pasa a "completado": fuera el cartel de viaje en curso,
+      // fuera el banner de cobro, y la etiqueta de arriba cambia sola.
+      var w=document.getElementById('accionWrap');
+      if(w){{ w.innerHTML="<div class='encurso' style='background:#334155'>✅ Viaje completado. Quedas disponible para nuevas carreras.</div>"; }}
+      var c=document.querySelector('.cobro'); if(c){{ c.style.display='none'; }}
+      var bd=document.querySelector('.badge'); if(bd){{ bd.textContent='COMPLETADO'; bd.style.background='#475569'; }}
       try{{ if(window.detenerGPS) detenerGPS(); }}catch(e){{}}
       try{{ if(window.clearMap) clearMap(); }}catch(e){{}}
     }}
