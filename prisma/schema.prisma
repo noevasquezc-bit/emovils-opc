@@ -179,6 +179,12 @@ model Merchant {
   metodoCobro CollectionMethod @default(spei) @map("metodo_cobro")
   estado      MerchantStatus   @default(activo)
 
+  // Términos de comisión NEGOCIADOS con este comercio (SPEC §4.2/§4.3).
+  // Si son null, se usa el default del plan (MerchantPlanConfig).
+  // Dan espacio para acordar un % distinto por comercio, no siempre fijo.
+  tasaComisionBps Int?    @map("tasa_comision_bps") // ej. 350 = 3.5 %
+  cuotaFija       BigInt? @map("cuota_fija") // piso mensual negociado (centavos)
+
   countryId String        @map("country_id")
   country   CountryConfig @relation(fields: [countryId], references: [id])
 

@@ -51,3 +51,36 @@ pasando. **Sin features de negocio todavía.**
 - Endpoints REST v1 (SPEC §9) y flujos de OTP/QR.
 - Seed de `CountryConfig` MX y planes de comercio.
 - ESLint/Prettier y suite de tests de `lib/money.ts`.
+
+---
+
+## ADR-0002 — Motor de descuentos/comisiones + comisión negociable
+
+**Fecha:** 2026-07-23 · **Estado:** aceptada
+
+### Contexto
+Segundo sprint funcional: registrar consumos con descuento y calcular la comisión
+mensual al comercio. Requisito del negocio: la comisión **no debe ser siempre
+fija** — debe haber espacio para negociar un % distinto con cada comercio.
+
+### Decisiones
+1. **Comisión negociable por comercio.** `Merchant` gana dos campos opcionales:
+   `tasaComisionBps` y `cuotaFija`. Si están presentes, **mandan** sobre el default
+   del plan (`MerchantPlanConfig`); si son null, se usa el del plan. La resolución
+   vive en `resolverTerminos()` (`lib/comisiones.ts`). El % acordado se captura al
+   dar de alta el comercio (`POST /api/v1/admin/comercios`).
+2. **Motor puro + endpoints.** La aritmética (descuento, comisión, IVA, rango de
+   periodo) es pura y testeada (`lib/money.ts`, `lib/comisiones.ts`); los route
+   handlers solo orquestan DB.
+3. **Endpoints v1:** `POST /transacciones` (registro idempotente con descuento
+   10 %/20 %), `POST /admin/comisiones/correr` (corrida mensual → factura),
+   `POST /admin/comercios` (alta con % negociado).
+4. **Snapshots + idempotencia** en transacciones (tasa aplicada) y comisiones
+   (términos usados), conforme a SPEC §8.
+5. **Tests con Vitest** (`npm test`): 15 casos sobre descuentos, comisión (piso vs
+   %), IVA, términos negociados y rango de periodo. Los archivos `*.test.ts` se
+   excluyen del `next build`.
+
+### Pendiente
+- Front de caja escaneando QR (depende del sprint de QR).
+- Emisión de CFDI real (PAC) para la factura de comisión.
