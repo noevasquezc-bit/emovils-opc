@@ -84,3 +84,38 @@ fija** — debe haber espacio para negociar un % distinto con cada comercio.
 ### Pendiente
 - Front de caja escaneando QR (depende del sprint de QR).
 - Emisión de CFDI real (PAC) para la factura de comisión.
+
+---
+
+## ADR-0003 — Sistema de QR + registro de cliente
+
+**Fecha:** 2026-07-23 · **Estado:** aceptada
+
+### Contexto
+Tercer sprint funcional: onboarding del cliente (registro por OTP) y su QR
+firmado, que la caja escanea para aplicar el descuento. Conecta el registro con
+el motor de descuentos del ADR-0002.
+
+### Decisiones
+1. **QR firmado HMAC-SHA256 por país** (`lib/qr.ts`), formato
+   `VINCULO|v1|{pais}|{clienteId}|{qrVersion}|{expUnix}|{sig}`. El QR **no lleva
+   PII**: solo id + firma. Secreto por país en `VINCULO_QR_SECRET_<PAIS>`.
+2. **Rotación por versión.** `verificarQr` valida firma/expiración; la vigencia
+   de `qrVersion` se compara contra `user.qrVersion` en la DB. Rotar =
+   incrementar la versión → los QR anteriores dejan de validar (antifraude).
+3. **Registro por OTP** (`OtpChallenge`): `POST /clientes/registro` (genera y
+   "envía" un OTP de 6 dígitos, hasheado con bcrypt, TTL 10 min, máx. 5 intentos)
+   y `POST /clientes/verificar` (crea el cliente plan `free` + emite QR). El envío
+   real (SMS/WhatsApp/email) queda como integración pendiente; en no-producción
+   el código se expone en `devCodigo` para pruebas.
+4. **Caja:** `POST /qr/validar` devuelve solo `{ nombreParcial, plan,
+   tasaDescuentoBps }`. `POST /transacciones` ahora acepta `qrToken` (además de
+   `clienteId`) y valida versión.
+5. **Rotar:** `POST /clientes/qr/rotar`. En producción se protegerá con sesión de
+   cliente; por ahora recibe `clienteId`.
+6. **Tests** (Vitest): 10 casos de firmar/verificar (roundtrip, manipulación,
+   expiración, formato) y `nombreParcial`. Total del proyecto: 25 tests.
+
+### Pendiente
+- Envío real de OTP y sesión de cliente (para proteger `/me/*`).
+- Front de caja (escáner) y tarjeta digital del cliente (render del QR).

@@ -150,6 +150,25 @@ model User {
 }
 
 // ─────────────────────────────────────────────────────────────
+//  Reto OTP para registro/verificación del cliente (SPEC §5.1)
+// ─────────────────────────────────────────────────────────────
+
+model OtpChallenge {
+  id         String   @id @default(uuid())
+  destino    String // email o teléfono (E.164)
+  canal      String // "email" | "sms" | "whatsapp"
+  pais       String
+  codigoHash String   @map("codigo_hash") // bcrypt del código (nunca en claro)
+  expiresAt  DateTime @map("expires_at")
+  consumido  Boolean  @default(false)
+  intentos   Int      @default(0)
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([destino])
+  @@map("otp_challenges")
+}
+
+// ─────────────────────────────────────────────────────────────
 //  Membresía del cliente (free | plus)
 // ─────────────────────────────────────────────────────────────
 

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { montoDescuento, montoCobrado, tasaDescuentoDeTier, type Tier } from "@/lib/money";
+import { verificarQr } from "@/lib/qr";
 import { n } from "@/lib/serialize";
 
 /**
@@ -13,15 +14,17 @@ import { n } from "@/lib/serialize";
  *
  * Idempotente vía `idempotencyKey`: un doble envío no duplica la transacción.
  *
- * Body: { merchantId, clienteId, montoBruto (centavos), idempotencyKey }
+ * Body: { merchantId, montoBruto (centavos), idempotencyKey,
+ *         qrToken? | clienteId? }
  *
- * Nota: en el próximo sprint, la caja identificará al cliente escaneando su QR
- * (`/qr/validar`); por ahora se recibe `clienteId` directo.
+ * El cliente se identifica escaneando su QR (`qrToken`, recomendado) o pasando
+ * `clienteId` directo. Si se usa `qrToken`, se valida firma y versión vigente.
  */
 export async function POST(req: Request) {
   let body: {
     merchantId?: string;
     clienteId?: string;
+    qrToken?: string;
     montoBruto?: number;
     idempotencyKey?: string;
   };
@@ -31,11 +34,12 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "JSON inválido" }, { status: 400 });
   }
 
-  const { merchantId, clienteId, montoBruto, idempotencyKey } = body;
+  const { merchantId, montoBruto, idempotencyKey, qrToken } = body;
+  let clienteId = body.clienteId;
 
-  if (!merchantId || !clienteId || !idempotencyKey) {
+  if (!merchantId || !idempotencyKey || (!clienteId && !qrToken)) {
     return NextResponse.json(
-      { error: "merchantId, clienteId e idempotencyKey son requeridos" },
+      { error: "merchantId, idempotencyKey y (qrToken o clienteId) son requeridos" },
       { status: 400 }
     );
   }
@@ -58,6 +62,20 @@ export async function POST(req: Request) {
     return NextResponse.json(respuesta(existente), { status: 200 });
   }
 
+  // Si viene qrToken, resuelve el clienteId validando firma y expiración.
+  let qrTokenVersion: number | null = null;
+  if (!clienteId && qrToken) {
+    const r = verificarQr(qrToken);
+    if (!r.ok) {
+      return NextResponse.json({ error: `QR inválido: ${r.error}` }, { status: 400 });
+    }
+    clienteId = r.data.clienteId;
+    qrTokenVersion = r.data.qrVersion;
+  }
+  if (!clienteId) {
+    return NextResponse.json({ error: "No se pudo identificar al cliente" }, { status: 400 });
+  }
+
   const merchant = await prisma.merchant.findUnique({
     where: { id: merchantId },
     include: { country: true },
@@ -72,6 +90,13 @@ export async function POST(req: Request) {
   });
   if (!cliente || cliente.role !== "cliente") {
     return NextResponse.json({ error: "Cliente no encontrado" }, { status: 404 });
+  }
+  // Rotación: si se identificó por QR, la versión debe ser la vigente.
+  if (qrTokenVersion !== null && qrTokenVersion !== cliente.qrVersion) {
+    return NextResponse.json(
+      { error: "QR caducado; el cliente debe regenerarlo" },
+      { status: 401 }
+    );
   }
 
   const tier: Tier = cliente.membership?.tier ?? "free";
