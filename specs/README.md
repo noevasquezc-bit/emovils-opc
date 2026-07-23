@@ -178,3 +178,29 @@ el backend (login de caja, validar QR, registrar transacción) sin nuevos modelo
 - Escaneo real con cámara (hoy se pega el QR).
 - Persistir la sesión de caja (localStorage) y provisión de sucursal en el device.
 - Dashboard de comercio y tarjeta digital del cliente.
+
+---
+
+## ADR-0006 — Dashboard de comercio
+
+**Fecha:** 2026-07-23 · **Estado:** aceptada
+
+### Contexto
+El lado del dueño del negocio: ver volumen, transacciones y comisión estimada del
+periodo. Da visibilidad y complementa el front de caja.
+
+### Decisiones
+1. **Endpoint** `GET /api/v1/comercio/dashboard?merchantId=&periodo=` (SPEC §9.3):
+   agrega volumen y ahorro a clientes, cuenta transacciones, calcula la **comisión
+   estimada con el mismo motor** (`resolverTerminos`+`calcularComision`, % negociado
+   o del plan + IVA) y desglosa por sucursal (`groupBy`).
+2. **UI** `/comercio` (`app/comercio/page.tsx`): tarjetas de KPIs + tabla por
+   sucursal. Importes en centavos formateados a MXN.
+3. Sin nuevos modelos ni migraciones; solo lectura.
+4. **Verificación visual** (Playwright): con datos sembrados en 2 sucursales, el
+   dashboard muestra volumen $3,560, comisión estimada $1,158.84 (3% negociado,
+   piso $999 + IVA) y el desglose correcto por sucursal.
+
+### Pendiente
+- Sesión de comercio_admin (hoy `merchantId` se pasa explícito).
+- Serie histórica y export; tarjeta digital del cliente.

@@ -12,6 +12,11 @@ export default function Home() {
           → Abrir pantalla de caja
         </a>
       </p>
+      <p>
+        <a href="/comercio" style={{ color: "#4f46e5", fontWeight: 600 }}>
+          → Dashboard de comercio
+        </a>
+      </p>
     </main>
   );
 }
