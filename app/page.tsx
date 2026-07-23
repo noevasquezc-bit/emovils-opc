@@ -17,6 +17,11 @@ export default function Home() {
           → Dashboard de comercio
         </a>
       </p>
+      <p>
+        <a href="/cliente" style={{ color: "#4f46e5", fontWeight: 600 }}>
+          → Tarjeta digital del cliente
+        </a>
+      </p>
     </main>
   );
 }

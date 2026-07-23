@@ -204,3 +204,31 @@ periodo. Da visibilidad y complementa el front de caja.
 ### Pendiente
 - Sesión de comercio_admin (hoy `merchantId` se pasa explícito).
 - Serie histórica y export; tarjeta digital del cliente.
+
+---
+
+## ADR-0007 — Tarjeta digital del cliente
+
+**Fecha:** 2026-07-23 · **Estado:** aceptada
+
+### Contexto
+Cierra el lado del cliente con UI: su QR, su ahorro y su historial. Decisión
+previa (a pedido): el QR se **renderiza localmente**, sin plataformas externas
+tipo qr.io — el QR es una credencial firmada, no un enlace, y meter un tercero
+rompería la validación offline y filtraría datos de escaneo (SPEC §7/§10/§11).
+
+### Decisiones
+1. **Endpoint** `GET /api/v1/clientes/me?clienteId=` (SPEC §9.1): perfil + QR
+   vigente + ahorro acumulado (suma histórica de descuentos) + historial reciente
+   con nombre del comercio. Solo lectura.
+2. **UI** `/cliente` (`app/cliente/page.tsx`): tarjeta con el QR renderizado con
+   `qrcode.react` (`QRCodeSVG value={qrToken}`) — imagen generada en el cliente a
+   partir de nuestro token firmado. Ahorro acumulado + historial.
+3. **Sin qr.io ni servicios externos** para la credencial; reservado, si acaso,
+   solo para QR de marketing/captación (enlaces).
+4. **Verificación visual** (Playwright): la tarjeta muestra el QR, $96.40 de
+   ahorro y 4 consumos con su descuento.
+
+### Pendiente
+- Sesión del cliente (hoy `clienteId` explícito) y descarga/print de la tarjeta.
+- Envío real de OTP (WhatsApp/SMS) para el registro fuera de dev.
