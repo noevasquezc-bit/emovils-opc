@@ -149,3 +149,32 @@ opera en la suya (least-privilege, SPEC §10).
 ### Pendiente
 - Sesión de cliente y protección de `/clientes/me/*`.
 - Front de caja (escáner) y dashboard de comercio.
+
+---
+
+## ADR-0005 — Front de caja (UI)
+
+**Fecha:** 2026-07-23 · **Estado:** aceptada
+
+### Contexto
+Primera interfaz de usuario: la pantalla que usa la cajera. Vuelve operable todo
+el backend (login de caja, validar QR, registrar transacción) sin nuevos modelos.
+
+### Decisiones
+1. **Página cliente** `/caja` (`app/caja/page.tsx`, `"use client"`), estilos en
+   `caja.module.css`. Consume los endpoints existentes; no agrega backend.
+2. **Flujo:** login por PIN de sucursal → token de caja en estado → escanear/pegar
+   QR → `POST /qr/validar` (muestra cliente, plan y % ) → capturar monto →
+   preview del descuento (calculado en centavos en el cliente) → confirmar →
+   `POST /transacciones` con `Authorization: Bearer` e `idempotencyKey`
+   (`crypto.randomUUID()`).
+3. **Importes en centavos también en la UI**; el formateo divide `/100` para
+   mostrar MXN. El preview replica la fórmula del backend (floor bps).
+4. **Verificación visual** con Chromium headless (Playwright): el recorrido
+   completo se ejecutó y se capturaron pantallas. Un screenshot detectó y se
+   corrigió un bug de formateo (centavos mostrados como pesos).
+
+### Pendiente
+- Escaneo real con cámara (hoy se pega el QR).
+- Persistir la sesión de caja (localStorage) y provisión de sucursal en el device.
+- Dashboard de comercio y tarjeta digital del cliente.

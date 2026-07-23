@@ -7,6 +7,11 @@ export default function Home() {
         Arquitectura base — Next.js 15, Prisma y NextAuth. Ver{" "}
         <code>SPEC.md</code> para el modelo funcional completo.
       </p>
+      <p>
+        <a href="/caja" style={{ color: "#4f46e5", fontWeight: 600 }}>
+          → Abrir pantalla de caja
+        </a>
+      </p>
     </main>
   );
 }
