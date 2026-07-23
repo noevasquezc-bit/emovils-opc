@@ -85,8 +85,32 @@ model CountryConfig {
   users        User[]
   merchants    Merchant[]
   transactions Transaction[]
+  planConfigs  MerchantPlanConfig[]
 
   @@map("country_config")
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Planes de comercio por país (la "tabla Planes", SPEC §4.3)
+//  Guarda la economía de cada plan: cuota fija + tasa de comisión.
+// ─────────────────────────────────────────────────────────────
+
+model MerchantPlanConfig {
+  id String @id @default(uuid())
+
+  countryId String        @map("country_id")
+  country   CountryConfig @relation(fields: [countryId], references: [id])
+
+  plan            MerchantPlan
+  cuotaFija       BigInt       @map("cuota_fija") // piso mensual (centavos)
+  tasaComisionBps Int          @map("tasa_comision_bps") // ej. 500 = 5 %
+  maxSucursales   Int?         @map("max_sucursales") // null = ilimitado
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([countryId, plan])
+  @@map("merchant_plan_configs")
 }
 
 // ─────────────────────────────────────────────────────────────
