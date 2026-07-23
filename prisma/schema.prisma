@@ -210,12 +210,38 @@ model Merchant {
   staff        User[]
   transactions Transaction[]
   invoices     CommissionInvoice[]
+  sucursales   Sucursal[]
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
   @@index([countryId])
   @@map("merchants")
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Sucursal = punto físico del comercio (SPEC §6.4)
+// ─────────────────────────────────────────────────────────────
+
+model Sucursal {
+  id         String   @id @default(uuid())
+  merchantId String   @map("merchant_id")
+  merchant   Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+
+  nombre    String
+  direccion String?
+  lat       Float?
+  lng       Float?
+  pinHash   String   @map("pin_hash") // PIN de acceso de caja (bcrypt)
+  activa    Boolean  @default(true)
+
+  transactions Transaction[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([merchantId])
+  @@map("sucursales")
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -234,6 +260,11 @@ model Transaction {
 
   merchantId String   @map("merchant_id")
   merchant   Merchant @relation(fields: [merchantId], references: [id])
+
+  // Sucursal donde ocurrió el consumo (opcional para compatibilidad;
+  // la caja la fija vía su sesión).
+  sucursalId String?   @map("sucursal_id")
+  sucursal   Sucursal? @relation(fields: [sucursalId], references: [id])
 
   montoBruto       BigInt     @map("monto_bruto") // total antes de descuento (centavos)
   tierAplicado     ClientTier @map("tier_aplicado") // snapshot del plan del cliente

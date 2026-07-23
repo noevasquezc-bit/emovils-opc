@@ -119,3 +119,33 @@ el motor de descuentos del ADR-0002.
 ### Pendiente
 - Envío real de OTP y sesión de cliente (para proteger `/me/*`).
 - Front de caja (escáner) y tarjeta digital del cliente (render del QR).
+
+---
+
+## ADR-0004 — Sucursal + login de caja
+
+**Fecha:** 2026-07-23 · **Estado:** aceptada
+
+### Contexto
+Cuarto sprint: puntos físicos (sucursales) y acceso de la cajera. Completa el
+modelo del MVP — la transacción queda registrada por sucursal y la cajera solo
+opera en la suya (least-privilege, SPEC §10).
+
+### Decisiones
+1. **Modelo `Sucursal`** (SPEC §6.4): nombre, dirección, lat/lng, `pinHash`
+   (bcrypt), activa. `Transaction` gana `sucursalId` (opcional, por compatibilidad).
+2. **Sesión de caja** (`lib/sesion_caja.ts`): token corto firmado con HMAC
+   (AUTH_SECRET), payload `{sucursalId, merchantId, exp}`, TTL 8 h. No es una
+   sesión de usuario NextAuth — es específica de caja.
+3. **Endpoints:** `POST /admin/sucursales` (alta con PIN; respeta el máx. de
+   sucursales del plan) y `POST /sucursal/login` (PIN → token de caja).
+4. **`/transacciones` con sesión de caja.** Si viene `Authorization: Bearer`, el
+   comercio y la sucursal salen del token (la cajera no puede registrar en otra
+   sucursal); sin sesión, se usan los del body (admin). La sucursal se valida
+   contra el comercio.
+5. **Tests** (Vitest): 4 casos de sesión de caja (roundtrip, firma, expiración,
+   formato). Total del proyecto: 29 tests.
+
+### Pendiente
+- Sesión de cliente y protección de `/clientes/me/*`.
+- Front de caja (escáner) y dashboard de comercio.

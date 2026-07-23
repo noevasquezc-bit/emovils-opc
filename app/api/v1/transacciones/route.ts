@@ -3,6 +3,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { montoDescuento, montoCobrado, tasaDescuentoDeTier, type Tier } from "@/lib/money";
 import { verificarQr } from "@/lib/qr";
+import { verificarSesionCaja, tokenDeHeader } from "@/lib/sesion_caja";
 import { n } from "@/lib/serialize";
 
 /**
@@ -19,10 +20,15 @@ import { n } from "@/lib/serialize";
  *
  * El cliente se identifica escaneando su QR (`qrToken`, recomendado) o pasando
  * `clienteId` directo. Si se usa `qrToken`, se valida firma y versión vigente.
+ *
+ * Autorización: si viene una sesión de caja (`Authorization: Bearer <token>`),
+ * el comercio y la sucursal salen de la sesión (la cajera solo registra en SU
+ * sucursal). Sin sesión, se usan `merchantId`/`sucursalId` del body (admin).
  */
 export async function POST(req: Request) {
   let body: {
     merchantId?: string;
+    sucursalId?: string;
     clienteId?: string;
     qrToken?: string;
     montoBruto?: number;
@@ -34,8 +40,24 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "JSON inválido" }, { status: 400 });
   }
 
-  const { merchantId, montoBruto, idempotencyKey, qrToken } = body;
+  const { montoBruto, idempotencyKey, qrToken } = body;
   let clienteId = body.clienteId;
+
+  // Sesión de caja (opcional): si viene, acota comercio/sucursal.
+  let merchantId = body.merchantId;
+  let sucursalId: string | null = body.sucursalId ?? null;
+  const tokenCaja = tokenDeHeader(req);
+  if (tokenCaja) {
+    const s = verificarSesionCaja(tokenCaja);
+    if (!s.ok) {
+      return NextResponse.json(
+        { error: `Sesión de caja inválida: ${s.error}` },
+        { status: 401 }
+      );
+    }
+    merchantId = s.data.merchantId; // la sesión manda (least-privilege)
+    sucursalId = s.data.sucursalId;
+  }
 
   if (!merchantId || !idempotencyKey || (!clienteId && !qrToken)) {
     return NextResponse.json(
@@ -84,6 +106,17 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Comercio no encontrado" }, { status: 404 });
   }
 
+  // Si hay sucursal, debe pertenecer a este comercio.
+  if (sucursalId) {
+    const suc = await prisma.sucursal.findUnique({ where: { id: sucursalId } });
+    if (!suc || suc.merchantId !== merchant.id) {
+      return NextResponse.json(
+        { error: "La sucursal no pertenece al comercio" },
+        { status: 400 }
+      );
+    }
+  }
+
   const cliente = await prisma.user.findUnique({
     where: { id: clienteId },
     include: { membership: true },
@@ -111,6 +144,7 @@ export async function POST(req: Request) {
         countryId: merchant.countryId,
         clienteId: cliente.id,
         merchantId: merchant.id,
+        sucursalId,
         montoBruto: bruto,
         tierAplicado: tier,
         tasaDescuentoBps,
