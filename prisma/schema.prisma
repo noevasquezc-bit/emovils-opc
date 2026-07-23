@@ -1,0 +1,310 @@
+// Vínculo — schema base (arquitectura, sin features aún).
+// Ver SPEC.md para el modelo funcional completo.
+// Provider: PostgreSQL (compatible con Neon — solo cambia DATABASE_URL).
+// Convención: montos SIEMPRE en centavos como BigInt (evita overflow de volumen).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Enums
+// ─────────────────────────────────────────────────────────────
+
+enum Role {
+  cliente
+  cajera
+  comercio_admin
+  super_admin
+}
+
+enum ClientTier {
+  free
+  plus
+}
+
+/// Estado de pago de la membresía del cliente (plan plus).
+enum PaymentStatus {
+  pendiente
+  pagado
+  vencido
+}
+
+enum MerchantPlan {
+  starter
+  growth
+  scale
+}
+
+enum MerchantStatus {
+  activo
+  moroso
+  suspendido
+}
+
+enum CollectionMethod {
+  spei
+  tarjeta
+  domiciliacion
+}
+
+enum TransactionStatus {
+  registrada
+  anulada
+}
+
+/// Estados de la factura de comisión B2B (único flujo de dinero de Vínculo).
+enum InvoiceStatus {
+  pendiente
+  emitida
+  pagada
+  vencida
+  en_cobranza
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Configuración multi-país (§6.1)
+// ─────────────────────────────────────────────────────────────
+
+model CountryConfig {
+  id             String   @id // ISO 3166-1 alpha-2, ej. "MX"
+  nombre         String
+  moneda         String // ISO 4217, ej. "MXN"
+  procesadorPago String   @map("procesador_pago")
+  idiomaDefault  String   @map("idioma_default") // ej. "es"
+  ivaPct         Int      @map("iva_pct") // porcentaje entero, ej. 16
+  activo         Boolean  @default(true)
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  users        User[]
+  merchants    Merchant[]
+  transactions Transaction[]
+  planConfigs  MerchantPlanConfig[]
+
+  @@map("country_config")
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Planes de comercio por país (la "tabla Planes", SPEC §4.3)
+//  Guarda la economía de cada plan: cuota fija + tasa de comisión.
+// ─────────────────────────────────────────────────────────────
+
+model MerchantPlanConfig {
+  id String @id @default(uuid())
+
+  countryId String        @map("country_id")
+  country   CountryConfig @relation(fields: [countryId], references: [id])
+
+  plan            MerchantPlan
+  cuotaFija       BigInt       @map("cuota_fija") // piso mensual (centavos)
+  tasaComisionBps Int          @map("tasa_comision_bps") // ej. 500 = 5 %
+  maxSucursales   Int?         @map("max_sucursales") // null = ilimitado
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([countryId, plan])
+  @@map("merchant_plan_configs")
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Usuarios (4 roles en una sola tabla)
+// ─────────────────────────────────────────────────────────────
+
+model User {
+  id           String  @id @default(uuid())
+  role         Role
+  email        String? @unique
+  telefono     String? @unique // E.164
+  nombre       String?
+  passwordHash String? @map("password_hash") // staff/admin; clientes usan OTP
+  mfa          Boolean @default(false)
+  estado       String  @default("activo") // activo | suspendido
+
+  // Multi-país
+  countryId String?        @map("country_id")
+  country   CountryConfig? @relation(fields: [countryId], references: [id])
+
+  // Cliente (role = cliente): QR firmado + membresía
+  qrToken    String? @unique @map("qr_token")
+  qrVersion  Int     @default(1) @map("qr_version")
+  membership MembershipTier?
+
+  // Staff de comercio (role = cajera | comercio_admin)
+  merchantId String?   @map("merchant_id")
+  merchant   Merchant? @relation(fields: [merchantId], references: [id])
+
+  transactions Transaction[] @relation("ClienteTransactions")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([merchantId])
+  @@map("users")
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Reto OTP para registro/verificación del cliente (SPEC §5.1)
+// ─────────────────────────────────────────────────────────────
+
+model OtpChallenge {
+  id         String   @id @default(uuid())
+  destino    String // email o teléfono (E.164)
+  canal      String // "email" | "sms" | "whatsapp"
+  pais       String
+  codigoHash String   @map("codigo_hash") // bcrypt del código (nunca en claro)
+  expiresAt  DateTime @map("expires_at")
+  consumido  Boolean  @default(false)
+  intentos   Int      @default(0)
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([destino])
+  @@map("otp_challenges")
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Membresía del cliente (free | plus)
+// ─────────────────────────────────────────────────────────────
+
+model MembershipTier {
+  id          String        @id @default(uuid())
+  userId      String        @unique @map("user_id")
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tier        ClientTier    @default(free)
+  vencimiento DateTime? // null en free (no vence); fecha límite en plus
+  estadoPago  PaymentStatus @default(pendiente) @map("estado_pago")
+  createdAt   DateTime      @default(now()) @map("created_at")
+  updatedAt   DateTime      @updatedAt @map("updated_at")
+
+  @@map("membership_tiers")
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Comercio afiliado (§6.3)
+// ─────────────────────────────────────────────────────────────
+
+model Merchant {
+  id          String           @id @default(uuid())
+  razonSocial String           @map("razon_social")
+  rfc         String? // ID fiscal (MX: RFC)
+  plan        MerchantPlan     @default(starter)
+  diaCorte    Int              @default(1) @map("dia_corte") // 1–28
+  metodoCobro CollectionMethod @default(spei) @map("metodo_cobro")
+  estado      MerchantStatus   @default(activo)
+
+  // Términos de comisión NEGOCIADOS con este comercio (SPEC §4.2/§4.3).
+  // Si son null, se usa el default del plan (MerchantPlanConfig).
+  // Dan espacio para acordar un % distinto por comercio, no siempre fijo.
+  tasaComisionBps Int?    @map("tasa_comision_bps") // ej. 350 = 3.5 %
+  cuotaFija       BigInt? @map("cuota_fija") // piso mensual negociado (centavos)
+
+  countryId String        @map("country_id")
+  country   CountryConfig @relation(fields: [countryId], references: [id])
+
+  staff        User[]
+  transactions Transaction[]
+  invoices     CommissionInvoice[]
+  sucursales   Sucursal[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([countryId])
+  @@map("merchants")
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Sucursal = punto físico del comercio (SPEC §6.4)
+// ─────────────────────────────────────────────────────────────
+
+model Sucursal {
+  id         String   @id @default(uuid())
+  merchantId String   @map("merchant_id")
+  merchant   Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+
+  nombre    String
+  direccion String?
+  lat       Float?
+  lng       Float?
+  pinHash   String   @map("pin_hash") // PIN de acceso de caja (bcrypt)
+  activa    Boolean  @default(true)
+
+  transactions Transaction[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([merchantId])
+  @@map("sucursales")
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Transacción = registro de consumo con descuento (§6.5)
+//  NO es un cobro de Vínculo. Vínculo no mueve el dinero del cliente.
+// ─────────────────────────────────────────────────────────────
+
+model Transaction {
+  id String @id @default(uuid())
+
+  countryId String        @map("country_id")
+  country   CountryConfig @relation(fields: [countryId], references: [id])
+
+  clienteId String @map("cliente_id")
+  cliente   User   @relation("ClienteTransactions", fields: [clienteId], references: [id])
+
+  merchantId String   @map("merchant_id")
+  merchant   Merchant @relation(fields: [merchantId], references: [id])
+
+  // Sucursal donde ocurrió el consumo (opcional para compatibilidad;
+  // la caja la fija vía su sesión).
+  sucursalId String?   @map("sucursal_id")
+  sucursal   Sucursal? @relation(fields: [sucursalId], references: [id])
+
+  montoBruto       BigInt     @map("monto_bruto") // total antes de descuento (centavos)
+  tierAplicado     ClientTier @map("tier_aplicado") // snapshot del plan del cliente
+  tasaDescuentoBps Int        @map("tasa_descuento_bps") // 1000 = 10%, 2000 = 20% (snapshot)
+  montoDescuento   BigInt     @map("monto_descuento")
+  montoCobrado     BigInt     @map("monto_cobrado") // bruto - descuento (informativo)
+
+  estado         TransactionStatus @default(registrada)
+  idempotencyKey String            @unique @map("idempotency_key")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([merchantId, createdAt])
+  @@index([clienteId])
+  @@map("transactions")
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Factura de comisión mensual = el ingreso de Vínculo (§6.6)
+// ─────────────────────────────────────────────────────────────
+
+model CommissionInvoice {
+  id         String   @id @default(uuid())
+  merchantId String   @map("merchant_id")
+  merchant   Merchant @relation(fields: [merchantId], references: [id])
+
+  periodo             String // "2026-07"
+  montoTransaccionado BigInt @map("monto_transaccionado") // volumen del periodo (centavos)
+  cuotaFija           BigInt @map("cuota_fija") // snapshot del plan
+  tasaComisionBps     Int    @map("tasa_comision_bps") // snapshot del plan
+  comision            BigInt // max(cuotaFija, tasa*volumen)
+  iva                 BigInt // sobre la comisión
+  total               BigInt // comision + iva
+
+  estado     InvoiceStatus @default(pendiente)
+  facturaRef String?       @map("factura_ref") // folio/UUID CFDI
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([merchantId, periodo])
+  @@map("commission_invoices")
+}
