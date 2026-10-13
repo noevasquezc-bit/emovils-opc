@@ -1,6 +1,17 @@
 # Credenciales — NUNCA subir
 .env
 *.env
+!.env.example
+
+# Node / Next.js (Vínculo)
+node_modules/
+.next/
+out/
+next-env.d.ts
+*.tsbuildinfo
+
+# Prisma
+/prisma/*.db
 
 # Python
 __pycache__/
