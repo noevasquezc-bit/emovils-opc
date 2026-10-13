@@ -3,6 +3,11 @@ export default function Home() {
     <main style={{ padding: "2.5rem", maxWidth: 640 }}>
       <h1>Vínculo</h1>
       <p>Plataforma de afiliación comercio-cliente.</p>
+      <p>
+        <a href="/afiliate" style={{ color: "#0891b2", fontWeight: 700 }}>
+          → Afíliate (alta de comercio)
+        </a>
+      </p>
       <p style={{ color: "#666" }}>
         Arquitectura base — Next.js 15, Prisma y NextAuth. Ver{" "}
         <code>SPEC.md</code> para el modelo funcional completo.

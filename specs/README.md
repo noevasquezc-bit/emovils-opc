@@ -232,3 +232,31 @@ rompería la validación offline y filtraría datos de escaneo (SPEC §7/§10/§
 ### Pendiente
 - Sesión del cliente (hoy `clienteId` explícito) y descarga/print de la tarjeta.
 - Envío real de OTP (WhatsApp/SMS) para el registro fuera de dev.
+
+---
+
+## ADR-0008 — Afiliación pública de comercios (self-service, ETOURS)
+
+**Fecha:** 2026-10-13 · **Estado:** aceptada
+
+### Contexto
+El negocio debe poder **inscribirse y afiliarse solo** desde la web (para
+ETOURS.DO), sin que un admin lo dé de alta. Onboarding self-service del afiliado.
+
+### Decisiones
+1. **Endpoint público** `POST /api/v1/afiliacion/comercio`: en una transacción
+   crea el `Merchant` + su `User` administrador (`comercio_admin`, email+contraseña
+   bcrypt) + opcionalmente su primera `Sucursal` con PIN. Valida email único,
+   contraseña ≥ 8, plan self-service (`starter`|`growth`; `scale` es negociado).
+2. **Endpoint** `GET /api/v1/planes?countryId=` para mostrar planes/precios del seed.
+3. **Página pública** `/afiliate` (`app/afiliate/page.tsx`) con branding **ETOURS.DO**:
+   hero + planes + formulario + pantalla de éxito con accesos (dashboard/caja).
+4. El admin creado puede autenticar con el provider Credentials de NextAuth ya
+   existente; la cajera entra de inmediato con el PIN de la sucursal.
+5. **Verificado end-to-end** (API + Playwright): alta pública crea comercio+admin+
+   sucursal, la cajera entra con el PIN, email duplicado → 409.
+
+### Pendiente (para conectar a etours.do en vivo)
+- **Deploy** a una URL pública (Vercel) con base de datos gestionada (Neon).
+- Enlazar/incrustar la página desde etours.do (botón "Afíliate").
+- UI de login de comercio_admin (hoy el dashboard recibe el merchantId explícito).
